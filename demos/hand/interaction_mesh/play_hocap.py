@@ -329,14 +329,12 @@ def main():
                 R_inv = hd["R_inv_list"][idx]
                 wrist_w = hd["wrist_list"][idx]
 
-                # Wrist translation: local→world
-                q[:3] = R_inv @ q[:3] + wrist_w
+                # Wrist translation: local→world (right multiply R_inv = R.T)
+                q[:3] = q[:3] @ R_inv + wrist_w
 
-                # Wrist rotation: compose R_inv with local hinge rotation
-                # MuJoCo XYZ hinges are intrinsic Euler
+                # Wrist rotation: compose with R_inv
                 R_local = RotLib.from_euler("XYZ", q[3:6]).as_matrix()
-                R_world = R_inv @ R_local
-                # Decompose back to XYZ Euler for MuJoCo hinges
+                R_world = R_local @ R_inv  # right multiply
                 q[3:6] = RotLib.from_matrix(R_world).as_euler("XYZ")
 
                 data.qpos[qpos_slices[hand_side]] = q
@@ -376,7 +374,7 @@ def main():
                         # Robot FK: retarget qpos → FK in wrist-relative → inverse rotate → world
                         ret.hand.forward(hd["qpos"][idx])
                         robot_local = ret._get_robot_keypoints()  # wrist-relative, rotated
-                        robot_world = (robot_local @ R_inv.T) + wrist_w  # back to world
+                        robot_world = (robot_local @ R_inv) + wrist_w  # back to world
 
                         if vis["source"]:
                             for pt in source_world:
