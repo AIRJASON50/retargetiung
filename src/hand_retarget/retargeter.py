@@ -1,16 +1,12 @@
 """
 Interaction-mesh-based hand retargeter.
 
-Adapted from OmniRetarget's InteractionMeshRetargeter for fixed-base dexterous hands.
-Core algorithm: minimize Laplacian deformation energy subject to joint limits and trust region,
-solved via SQP with CVXPY + Clarabel SOCP solver.
+Adapted from OmniRetarget for dexterous hands. Supports:
+- robot_only: fixed base, 20 DOF, hand keypoints only
+- object mode: 6DOF wrist + 20 finger = 26 DOF, hand + object surface points
 
-Matches OmniRetarget robot_only mode behavior:
-- Delaunay topology rebuilt every frame from source keypoints
-- Laplacian matrix recomputed every SQP iteration from current robot positions
-- Laplacian weight = 10 (uniform across all keypoints)
-- No floating base (T(q) = I for all-hinge)
-- No foot sticking, no object interaction
+Core algorithm: minimize Laplacian deformation energy subject to joint limits
+and trust region, solved via SQP with CVXPY + Clarabel SOCP solver.
 """
 
 import numpy as np
@@ -68,20 +64,6 @@ class InteractionMeshHandRetargeter:
         # Cached topology per frame (rebuilt each frame from source points)
         self._adj_list = None
 
-    def _build_topology(self, source_positions: np.ndarray):
-        """
-        Build Delaunay interaction mesh from source keypoints.
-        Called every frame (matching OmniRetarget behavior).
-
-        Args:
-            source_positions: (N, 3) keypoint positions
-        Returns:
-            adj_list: adjacency list
-        """
-        _, simplices = create_interaction_mesh(source_positions)
-        self._adj_list = get_adjacency_list(simplices, self.n_keypoints)
-        return self._adj_list
-
     def _extract_source_keypoints(self, landmarks: np.ndarray) -> np.ndarray:
         """Extract the mapped keypoints from full 21-point MediaPipe landmarks."""
         return landmarks[self.mp_indices]
@@ -90,8 +72,14 @@ class InteractionMeshHandRetargeter:
         """
         Compute per-keypoint weights based on pinch proximity.
         Only monitors thumb-to-other-fingertip pairs (4 pairs).
-        Non-pinch points get weight 1.0, pinch points get up to max_boost.
+
+        Args:
+            source_pts: (n_keypoints, 3) hand-only keypoints (NOT including object points)
+
+        Returns:
+            (n_keypoints,) weight array, 1.0 for non-pinch, up to max_boost for pinch
         """
+        assert len(source_pts) == self.n_keypoints
         w = np.ones(self.n_keypoints)
 
         for tip_mapped in self._other_tips_mapped:
@@ -245,6 +233,10 @@ class InteractionMeshHandRetargeter:
         """
         # Extract mapped keypoints
         source_pts = self._extract_source_keypoints(landmarks)  # (n_hand, 3)
+
+        # Guard against empty object points
+        if object_pts_world is not None and len(object_pts_world) == 0:
+            object_pts_world = None
 
         # Combine hand + object points for mesh construction
         if object_pts_world is not None:

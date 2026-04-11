@@ -87,9 +87,10 @@ FINGERTIP_MP_INDICES = [4, 8, 12, 16, 20]
 class HandRetargetConfig:
     """Configuration for interaction mesh hand retargeting."""
 
-    # Model (uses baseline's URDF which includes tip_link frames)
-    mjcf_path: str = ""  # accepts URDF or MJCF path
+    # Model
+    mjcf_path: str = ""  # URDF (fixed base, Pinocchio) or scene XML (floating, MuJoCo)
     hand_side: str = "left"
+    floating_base: bool = False  # True: 6DOF wrist + 20 finger = 26 DOF (object mode)
 
     # Optimization
     step_size: float = 0.1        # Trust region radius (SOC constraint)
@@ -134,6 +135,11 @@ class HandRetargetConfig:
                      "activate_joint_limits", "activate_self_collision"):
             if key in opt:
                 setattr(cfg, key, opt[key])
+
+        if "floating_base" in opt:
+            cfg.floating_base = opt["floating_base"]
+        if "object_sample_count" in opt:
+            cfg.object_sample_count = opt["object_sample_count"]
 
         retarget = data.get("retarget", {})
         if "global_scale" in retarget:

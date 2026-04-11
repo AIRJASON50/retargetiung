@@ -140,14 +140,13 @@ def transform_object_points(pts_local: np.ndarray, quat: np.ndarray, trans: np.n
 
     Args:
         pts_local: (M, 3) points in object local frame
-        quat: (4,) quaternion (xyzw or wxyz — auto-detected by norm of first element)
+        quat: (4,) quaternion in xyzw format (scipy convention, matches HO-Cap)
         trans: (3,) translation
 
     Returns:
         (M, 3) points in world frame
     """
     from scipy.spatial.transform import Rotation as R
-    # HO-Cap uses xyzw quaternion format
     rot = R.from_quat(quat).as_matrix()
     return (rot @ pts_local.T).T + trans
 
