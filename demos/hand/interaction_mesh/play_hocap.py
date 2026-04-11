@@ -96,11 +96,12 @@ def retarget_hand(clip, hand_side, scene_xml, obj_samples, semantic_weight):
     retargeter = InteractionMeshHandRetargeter(config)
     qpos = retargeter.retarget_hocap_sequence(clip, use_semantic_weights=semantic_weight)
 
-    # Precompute viz data
+    # Precompute per-frame inverse transforms for world-frame visualization
+    # retarget works in SVD+MANO rotated wrist-relative frame
+    # viz needs world frame: world_pos = R_full_inv @ local_pos + wrist_world
     T = len(clip["landmarks"])
-    obj_pts_viz = []
-    source_pts_viz = []
-    obj_pose_viz = []
+    R_inv_list = []    # per-frame inverse rotation
+    wrist_list = []    # per-frame wrist world position
 
     for t in range(T):
         lm_raw = clip["landmarks"][t]
@@ -113,24 +114,17 @@ def retarget_hand(clip, hand_side, scene_xml, obj_samples, semantic_weight):
         R_extra = Rotation.from_euler("xyz", angles, degrees=True).as_matrix() if any(a != 0 for a in angles) else np.eye(3)
         R_full = R_t @ R_extra.T
 
-        obj_world = transform_object_points(clip["object_pts_local"], clip["object_q"][t], clip["object_t"][t])
-        obj_viz = (obj_world - wrist) @ R_full
-        obj_pts_viz.append(obj_viz)
-
-        obj_center_viz = (clip["object_t"][t] - wrist) @ R_full
-        R_obj_world = Rotation.from_quat(clip["object_q"][t]).as_matrix()
-        R_obj_viz = R_full.T @ R_obj_world
-        q_xyzw = Rotation.from_matrix(R_obj_viz).as_quat()
-        obj_pose_viz.append((obj_center_viz, np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])))
-
-        source_pts_viz.append(transformed)
+        # R_full transforms: world_centered → preprocessed
+        # R_full_inv transforms: preprocessed → world_centered
+        R_inv_list.append(np.linalg.inv(R_full))
+        wrist_list.append(wrist.copy())
 
     return {
         "qpos": qpos,
         "retargeter": retargeter,
-        "obj_pts_viz": obj_pts_viz,
-        "source_pts_viz": source_pts_viz,
-        "obj_pose_viz": obj_pose_viz,
+        "R_inv_list": R_inv_list,
+        "wrist_list": wrist_list,
+        "clip": clip,
         "config": config,
     }
 
@@ -219,13 +213,14 @@ def main():
     model = spec.compile()
     data = mujoco.MjData(model)
 
-    # Semi-transparent hands
+    # For bimanual: hide hand mesh (FK is in wrong frame for viz, overlay shows world-frame)
+    # For single hand: semi-transparent
     for i in range(model.ngeom):
         geom_name = model.geom(i).name
         is_obj = "hocap" in geom_name
         is_ground = model.geom_type[i] == mujoco.mjtGeom.mjGEOM_PLANE
         if not is_obj and not is_ground:
-            model.geom_rgba[i, 3] = 0.25
+            model.geom_rgba[i, 3] = 0.0 if bimanual else 0.25
 
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
@@ -327,32 +322,18 @@ def main():
 
             idx = max(0, min(idx, total_frames - 1))
 
-            # Set qpos for each hand
-            # Bimanual: space hands apart by fixed offset (left=-0.15, right=+0.15 on X)
-            for hi, hand_side in enumerate(hands):
+            # Set qpos — retarget qpos is in wrist-relative frame, no offset needed for MuJoCo
+            # (MuJoCo model is wrist-relative too — wrist body at origin)
+            for hand_side in hands:
                 hd = hand_data[hand_side]
-                q = hd["qpos"][idx].copy()
+                data.qpos[qpos_slices[hand_side]] = hd["qpos"][idx]
 
-                if bimanual:
-                    # Fixed X offset to separate hands visually
-                    x_offset = 0.15 if hand_side == "right" else -0.15
-                    q[0] += x_offset
-
-                data.qpos[qpos_slices[hand_side]] = q
-
-            # Set object mocap
-            if bimanual:
-                # Object centered between hands
-                data.mocap_pos[0] = [0, 0, 0.1]
-                data.mocap_quat[0] = bimanual_obj_q_wxyz[idx]
-            else:
-                first_hand = hand_data[hands[0]]
-                obj_pos, obj_quat = first_hand["obj_pose_viz"][idx]
-                data.mocap_pos[0] = obj_pos
-                data.mocap_quat[0] = obj_quat
+            # Object mocap in world frame
+            data.mocap_pos[0] = bimanual_obj_t[idx] if bimanual else [0, 0, 0]
+            data.mocap_quat[0] = bimanual_obj_q_wxyz[idx] if bimanual else [1, 0, 0, 0]
             mujoco.mj_forward(model, data)
 
-            # Draw overlay
+            # Draw overlay — transform everything to world frame for visualization
             any_vis = vis["source"] or vis["robot"] or vis["mesh"]
             if any_vis:
                 with viewer.lock():
@@ -361,32 +342,37 @@ def main():
                     for hand_side in hands:
                         hd = hand_data[hand_side]
                         ret = hd["retargeter"]
-                        source_lm = hd["source_pts_viz"][idx]
-                        source_mapped = source_lm[ret.mp_indices].copy()
-                        obj_pts = hd["obj_pts_viz"][idx].copy()
+                        R_inv = hd["R_inv_list"][idx]
+                        wrist_w = hd["wrist_list"][idx]
 
-                        # For bimanual: offset source/object by same fixed offset as robot
-                        if bimanual:
-                            x_offset = 0.15 if hand_side == "right" else -0.15
-                            source_mapped[:, 0] += x_offset
-                            obj_pts[:, 0] += x_offset
+                        # Source: preprocessed (wrist-relative rotated) → world
+                        lm_raw = hd["clip"]["landmarks"][idx]
+                        source_world = lm_raw[ret.mp_indices]  # direct world coords from data
+
+                        # Object points in world frame
+                        obj_world = transform_object_points(
+                            hd["clip"]["object_pts_local"],
+                            hd["clip"]["object_q"][idx],
+                            hd["clip"]["object_t"][idx],
+                        )
+
+                        # Robot FK: retarget qpos → FK in wrist-relative → inverse rotate → world
+                        ret.hand.forward(hd["qpos"][idx])
+                        robot_local = ret._get_robot_keypoints()  # wrist-relative, rotated
+                        robot_world = (robot_local @ R_inv.T) + wrist_w  # back to world
 
                         if vis["source"]:
-                            for pt in source_mapped:
+                            for pt in source_world:
                                 _add_sphere(viewer.user_scn, pt, COL_SOURCE)
-                            for pt in obj_pts:
+                            for pt in obj_world:
                                 _add_sphere(viewer.user_scn, pt, COL_OBJ_PTS, 0.003)
 
                         if vis["robot"]:
-                            # Use viz model body positions (already has wrist offset)
-                            q_hand = data.qpos[qpos_slices[hand_side]]
-                            ret.hand.forward(q_hand)
-                            for name in ret.body_names:
-                                pt = ret.hand.get_body_pos(name)
+                            for pt in robot_world:
                                 _add_sphere(viewer.user_scn, pt, COL_ROBOT)
 
                         if vis["mesh"]:
-                            all_pts = np.vstack([source_mapped, obj_pts])
+                            all_pts = np.vstack([source_world, obj_world])
                             _, simp = create_interaction_mesh(all_pts)
                             adj = get_adjacency_list(simp, len(all_pts))
                             edges = {(min(i, j), max(i, j)) for i, nb in enumerate(adj) for j in nb}
