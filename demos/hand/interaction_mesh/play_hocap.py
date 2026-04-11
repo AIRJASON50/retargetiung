@@ -141,6 +141,7 @@ def main():
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--obj-samples", type=int, default=50)
     parser.add_argument("--semantic-weight", action="store_true")
+    parser.add_argument("--frames", type=int, default=None, help="Limit number of frames")
     args = parser.parse_args()
 
     # Resolve paths
@@ -172,6 +173,13 @@ def main():
         print(f"\nRetargeting {hand_side} hand...")
         clip = load_hocap_clip(npz_path, meta_path, str(HOCAP_DIR / "assets"),
                                hand_side=hand_side, sample_count=args.obj_samples)
+        # Limit frames if requested
+        if args.frames:
+            N = min(args.frames, len(clip["landmarks"]))
+            clip = {k: v[:N] if isinstance(v, np.ndarray) and v.ndim > 0 and v.shape[0] >= N else v
+                    for k, v in clip.items()}
+            clip["object_pts_local"] = load_hocap_clip(npz_path, meta_path, str(HOCAP_DIR / "assets"),
+                                                        hand_side=hand_side, sample_count=args.obj_samples)["object_pts_local"]
         hand_data[hand_side] = retarget_hand(clip, hand_side, scene, args.obj_samples, args.semantic_weight)
 
     total_frames = len(next(iter(hand_data.values()))["qpos"])
