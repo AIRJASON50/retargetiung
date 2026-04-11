@@ -268,10 +268,20 @@ def main():
             else:
                 state["direction"] *= -1
 
+    # Preload bimanual object world-frame data (avoid per-frame np.load)
+    bimanual_obj_t = None
+    bimanual_obj_q_wxyz = None
+    if bimanual:
+        raw_data = np.load(npz_path, allow_pickle=True)
+        obj_t_all = raw_data["object_t"][:total_frames, 0, :]  # (T, 3)
+        obj_q_all = raw_data["object_q"][:total_frames, 0, :]  # (T, 4) xyzw
+        bimanual_obj_t = obj_t_all
+        bimanual_obj_q_wxyz = np.stack([obj_q_all[:, 3], obj_q_all[:, 0], obj_q_all[:, 1], obj_q_all[:, 2]], axis=1)
+
     viewer = mujoco.viewer.launch_passive(model, data, key_callback=key_callback)
     viewer.cam.azimuth = 180
     viewer.cam.elevation = -25
-    viewer.cam.distance = 0.6
+    viewer.cam.distance = 0.8 if bimanual else 0.6
     viewer.cam.lookat[:] = [0, 0, 0.15]
 
     mode_str = "bimanual" if bimanual else f"single ({hands[0]})"
@@ -337,13 +347,8 @@ def main():
 
             # Set object mocap — use world-frame object position for bimanual
             if bimanual:
-                # Object in world frame (not wrist-relative, since hands are now in world)
-                raw_data = np.load(npz_path, allow_pickle=True)
-                obj_t_frame = raw_data["object_t"][idx, 0]
-                obj_q_frame = raw_data["object_q"][idx, 0]
-                data.mocap_pos[0] = obj_t_frame
-                # Convert xyzw → wxyz for MuJoCo
-                data.mocap_quat[0] = [obj_q_frame[3], obj_q_frame[0], obj_q_frame[1], obj_q_frame[2]]
+                data.mocap_pos[0] = bimanual_obj_t[idx]
+                data.mocap_quat[0] = bimanual_obj_q_wxyz[idx]
             else:
                 first_hand = hand_data[hands[0]]
                 obj_pos, obj_quat = first_hand["obj_pose_viz"][idx]
