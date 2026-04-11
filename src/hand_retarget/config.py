@@ -104,9 +104,8 @@ class HandRetargetConfig:
     object_sample_count: int = 100  # surface points sampled from object mesh
 
     # MediaPipe preprocessing
-    # Global scale: auto-computed as robot_palm_to_middle_tip / source_palm_to_middle_tip
-    # Set to None for auto-compute, or a float to override
     global_scale: float | None = None
+    use_mano_rotation: bool = True  # True: SVD+OPERATOR2MANO (manus data), False: wrist-center only (HO-Cap)
     mediapipe_rotation: dict = field(default_factory=lambda: {
         "x": 0.0, "y": 0.0, "z": 15.0,
     })

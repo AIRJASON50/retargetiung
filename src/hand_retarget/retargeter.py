@@ -375,34 +375,31 @@ class InteractionMeshHandRetargeter:
                 self.config.mediapipe_rotation,
                 hand_side=self.config.hand_side,
                 global_scale=self.global_scale,
+                use_mano_rotation=self.config.use_mano_rotation,
             )
 
             # Object points: mesh local → world → wrist-relative
-            # (wrist_pos = raw landmark[0], before preprocessing)
             wrist_world = landmarks_raw[t, 0]
             obj_world = transform_object_points(obj_pts_local, obj_q[t], obj_t[t])
-            obj_wrist_relative = obj_world - wrist_world  # same origin as preprocessed hand
+            obj_wrist_relative = obj_world - wrist_world
 
-            # Apply the same SVD + MANO rotation as hand preprocessing
-            # (preprocess_landmarks does: center → SVD → MANO → scale)
-            # We need to apply the SAME rotation to object points
-            from wuji_retargeting.mediapipe import apply_mediapipe_transformations
-            # Get the rotation by comparing raw centered vs preprocessed
-            raw_centered = landmarks_raw[t] - wrist_world
-            transformed = apply_mediapipe_transformations(landmarks_raw[t].copy(), self.config.hand_side)
-            # Solve for R: transformed = raw_centered @ R.T (least squares)
-            # Use the first few non-degenerate points
-            R_transform, _, _, _ = np.linalg.lstsq(raw_centered[1:6], transformed[1:6], rcond=None)
-            obj_transformed = obj_wrist_relative @ R_transform
+            if self.config.use_mano_rotation:
+                # Apply same SVD+MANO rotation as hand preprocessing
+                from wuji_retargeting.mediapipe import apply_mediapipe_transformations
+                raw_centered = landmarks_raw[t] - wrist_world
+                transformed = apply_mediapipe_transformations(landmarks_raw[t].copy(), self.config.hand_side)
+                R_transform, _, _, _ = np.linalg.lstsq(raw_centered[1:6], transformed[1:6], rcond=None)
+                obj_transformed = obj_wrist_relative @ R_transform
 
-            # Apply additional mediapipe_rotation
-            from scipy.spatial.transform import Rotation
-            angles = [self.config.mediapipe_rotation.get(k, 0) for k in "xyz"]
-            if any(a != 0 for a in angles):
-                R_extra = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
-                obj_transformed = obj_transformed @ R_extra.T
+                from scipy.spatial.transform import Rotation
+                angles = [self.config.mediapipe_rotation.get(k, 0) for k in "xyz"]
+                if any(a != 0 for a in angles):
+                    R_extra = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
+                    obj_transformed = obj_transformed @ R_extra.T
+            else:
+                # No rotation — object stays in world-centered frame
+                obj_transformed = obj_wrist_relative
 
-            # Apply global scale
             if self.global_scale != 1.0:
                 obj_transformed *= self.global_scale
 

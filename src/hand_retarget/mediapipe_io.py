@@ -52,36 +52,41 @@ def preprocess_landmarks(
     mediapipe_rotation: dict,
     hand_side: str = "left",
     global_scale: float = 1.0,
+    use_mano_rotation: bool = True,
 ) -> np.ndarray:
     """
     Full preprocessing pipeline for a single frame.
-    Matches OmniRetarget robot_only: coordinate transform + global scale only.
 
     Pipeline:
-        1. apply_mediapipe_transformations (center + SVD frame + OPERATOR2MANO)
+        1a. If use_mano_rotation: apply_mediapipe_transformations (center + SVD + OPERATOR2MANO)
+        1b. Else: center to wrist only (no rotation)
         2. apply additional rotation from config (e.g. 15 deg Z for manus data)
-        3. apply global uniform scale (like OmniRetarget's smpl_scale)
+        3. apply global uniform scale
 
     Args:
         landmarks: (21, 3) raw MediaPipe landmarks
         mediapipe_rotation: rotation dict {'x': ..., 'y': ..., 'z': ...} in degrees
         hand_side: "left" or "right"
         global_scale: uniform scale factor (robot_size / human_size)
+        use_mano_rotation: if True, apply SVD + OPERATOR2MANO; if False, only center to wrist
 
     Returns:
-        (21, 3) preprocessed landmarks in robot hand frame
+        (21, 3) preprocessed landmarks
     """
-    # Step 1: baseline's full transform (center + SVD + OPERATOR2MANO)
-    lm = apply_mediapipe_transformations(landmarks.copy(), hand_side)
+    if use_mano_rotation:
+        # Full transform: center + SVD frame + OPERATOR2MANO
+        lm = apply_mediapipe_transformations(landmarks.copy(), hand_side)
+    else:
+        # Simple center to wrist, no rotation
+        lm = landmarks.copy() - landmarks[0:1, :]
 
-    # Step 2: additional rotation from config (manus-specific adjustment)
+    # Step 2: additional rotation from config
     angles = [mediapipe_rotation.get("x", 0), mediapipe_rotation.get("y", 0), mediapipe_rotation.get("z", 0)]
     if any(a != 0 for a in angles):
         R = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
         lm = lm @ R.T
 
-    # Step 3: global uniform scale (matches OmniRetarget's smpl_scale)
-    # No per-segment manual calibration — Laplacian + FK handles proportion differences
+    # Step 3: global uniform scale
     if global_scale != 1.0:
         lm *= global_scale
 
