@@ -33,7 +33,11 @@ class InteractionMeshHandRetargeter:
 
     def __init__(self, config: HandRetargetConfig):
         self.config = config
-        self.hand = MuJoCoHandModel(config.mjcf_path)
+        if config.floating_base:
+            from .mujoco_hand import MuJoCoFloatingHandModel
+            self.hand = MuJoCoFloatingHandModel(config.mjcf_path, config.hand_side)
+        else:
+            self.hand = MuJoCoHandModel(config.mjcf_path)
 
         # Keypoint mapping: sorted by MediaPipe index
         self.mp_indices = sorted(config.joints_mapping.keys())
@@ -320,3 +324,82 @@ class InteractionMeshHandRetargeter:
             q_prev = q_opt
 
         return qpos_seq, timestamps
+
+    def retarget_hocap_sequence(
+        self,
+        clip: dict,
+        use_semantic_weights: bool = False,
+    ) -> np.ndarray:
+        """
+        Retarget a HO-Cap clip with object interaction.
+
+        Object points are transformed to wrist-relative coordinates each frame
+        (matching the hand preprocessing which centers at wrist).
+
+        Args:
+            clip: dict from load_hocap_clip() with keys:
+                landmarks, object_pts_local, object_t, object_q, fps
+            use_semantic_weights: enable pinch-aware weighting
+
+        Returns:
+            qpos_seq: (T, nq) joint angle sequence
+        """
+        from .mediapipe_io import preprocess_landmarks, transform_object_points
+
+        landmarks_raw = clip["landmarks"]       # (T, 21, 3) world frame
+        obj_pts_local = clip["object_pts_local"]  # (M, 3) mesh local
+        obj_t = clip["object_t"]                # (T, 3)
+        obj_q = clip["object_q"]                # (T, 4)
+        T = len(landmarks_raw)
+
+        qpos_seq = np.zeros((T, self.nq))
+        q_prev = self.hand.get_default_qpos()
+
+        for t in tqdm(range(T), desc="Retargeting (obj mode)"):
+            # Preprocess hand landmarks (center to wrist + SVD + MANO + scale)
+            lm = preprocess_landmarks(
+                landmarks_raw[t],
+                self.config.mediapipe_rotation,
+                hand_side=self.config.hand_side,
+                global_scale=self.global_scale,
+            )
+
+            # Object points: mesh local → world → wrist-relative
+            # (wrist_pos = raw landmark[0], before preprocessing)
+            wrist_world = landmarks_raw[t, 0]
+            obj_world = transform_object_points(obj_pts_local, obj_q[t], obj_t[t])
+            obj_wrist_relative = obj_world - wrist_world  # same origin as preprocessed hand
+
+            # Apply the same SVD + MANO rotation as hand preprocessing
+            # (preprocess_landmarks does: center → SVD → MANO → scale)
+            # We need to apply the SAME rotation to object points
+            from wuji_retargeting.mediapipe import apply_mediapipe_transformations
+            # Get the rotation by comparing raw centered vs preprocessed
+            raw_centered = landmarks_raw[t] - wrist_world
+            transformed = apply_mediapipe_transformations(landmarks_raw[t].copy(), self.config.hand_side)
+            # Solve for R: transformed = raw_centered @ R.T (least squares)
+            # Use the first few non-degenerate points
+            R_transform, _, _, _ = np.linalg.lstsq(raw_centered[1:6], transformed[1:6], rcond=None)
+            obj_transformed = obj_wrist_relative @ R_transform
+
+            # Apply additional mediapipe_rotation
+            from scipy.spatial.transform import Rotation
+            angles = [self.config.mediapipe_rotation.get(k, 0) for k in "xyz"]
+            if any(a != 0 for a in angles):
+                R_extra = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
+                obj_transformed = obj_transformed @ R_extra.T
+
+            # Apply global scale
+            if self.global_scale != 1.0:
+                obj_transformed *= self.global_scale
+
+            q_opt = self.retarget_frame(
+                lm, q_prev,
+                is_first_frame=(t == 0),
+                use_semantic_weights=use_semantic_weights,
+                object_pts_world=obj_transformed,
+            )
+            qpos_seq[t] = q_opt
+            q_prev = q_opt
+
+        return qpos_seq
