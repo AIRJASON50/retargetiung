@@ -320,13 +320,35 @@ def main():
             # Set qpos for each hand
             for hand_side in hands:
                 hd = hand_data[hand_side]
-                data.qpos[qpos_slices[hand_side]] = hd["qpos"][idx]
+                q = hd["qpos"][idx].copy()
 
-            # Set object mocap (use first hand's viz data)
-            first_hand = hand_data[hands[0]]
-            obj_pos, obj_quat = first_hand["obj_pose_viz"][idx]
-            data.mocap_pos[0] = obj_pos
-            data.mocap_quat[0] = obj_quat
+                # For bimanual: offset wrist translation by world-frame wrist position
+                # (each hand was retargeted in its own wrist-relative frame)
+                if bimanual and hasattr(hd["retargeter"], "_source_wrist_world"):
+                    wrist_world = hd["retargeter"]._source_wrist_world[idx]
+                    # Apply the same SVD+MANO rotation to get viz-frame offset
+                    # Use the precomputed R_full from source_pts_viz
+                    # Simpler: just use raw world offset (approximate but separates hands)
+                    q[0] += wrist_world[0]  # tx
+                    q[1] += wrist_world[1]  # ty
+                    q[2] += wrist_world[2]  # tz
+
+                data.qpos[qpos_slices[hand_side]] = q
+
+            # Set object mocap — use world-frame object position for bimanual
+            if bimanual:
+                # Object in world frame (not wrist-relative, since hands are now in world)
+                raw_data = np.load(npz_path, allow_pickle=True)
+                obj_t_frame = raw_data["object_t"][idx, 0]
+                obj_q_frame = raw_data["object_q"][idx, 0]
+                data.mocap_pos[0] = obj_t_frame
+                # Convert xyzw → wxyz for MuJoCo
+                data.mocap_quat[0] = [obj_q_frame[3], obj_q_frame[0], obj_q_frame[1], obj_q_frame[2]]
+            else:
+                first_hand = hand_data[hands[0]]
+                obj_pos, obj_quat = first_hand["obj_pose_viz"][idx]
+                data.mocap_pos[0] = obj_pos
+                data.mocap_quat[0] = obj_quat
             mujoco.mj_forward(model, data)
 
             # Draw overlay
