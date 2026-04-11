@@ -252,8 +252,8 @@ def main():
     viewer = mujoco.viewer.launch_passive(model, data, key_callback=key_callback)
     viewer.cam.azimuth = 180
     viewer.cam.elevation = -25
-    viewer.cam.distance = 0.4
-    viewer.cam.lookat[:] = [0, 0, 0.08]
+    viewer.cam.distance = 0.6
+    viewer.cam.lookat[:] = [0, 0, 0.15]
 
     print(f"Keys: SPACE=pause LEFT=step/reverse UP=mesh DOWN=source RIGHT=robot")
     print("=" * 50)
