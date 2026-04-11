@@ -179,6 +179,7 @@ def main():
     obj_geom.type = mujoco.mjtGeom.mjGEOM_MESH
     obj_geom.meshname = "hocap_obj_mesh"
     obj_geom.rgba = [0.6, 0.4, 0.2, 0.5]  # semi-transparent brown
+    obj_geom.group = 0  # visible in default viewer (groups 0-2 shown)
     obj_geom.contype = 0
     obj_geom.conaffinity = 0
 
