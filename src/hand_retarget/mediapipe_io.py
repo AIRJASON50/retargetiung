@@ -191,6 +191,12 @@ def load_hocap_clip(npz_path: str, meta_path: str, assets_dir: str,
     object_q = data["object_q"][:, 0, :].astype(np.float64)  # (T, 4)
     fps = float(data["fps"])
 
+    # Wrist pose (for direct assignment if needed)
+    wrist_t_key = f"wrist_t_{hand_side[0]}"
+    wrist_q_key = f"wrist_q_{hand_side[0]}"
+    wrist_t = data[wrist_t_key].astype(np.float64) if wrist_t_key in data and data[wrist_t_key].dtype != object else None
+    wrist_q = data[wrist_q_key].astype(np.float64) if wrist_q_key in data and data[wrist_q_key].dtype != object else None
+
     # Load meta to get asset name
     with open(meta_path) as f:
         meta = json.load(f)
@@ -205,6 +211,8 @@ def load_hocap_clip(npz_path: str, meta_path: str, assets_dir: str,
         "object_pts_local": object_pts_local,
         "object_t": object_t,
         "object_q": object_q,
+        "wrist_t": wrist_t,
+        "wrist_q": wrist_q,
         "fps": fps,
         "asset_name": asset_name,
         "mesh_path": mesh_path,
