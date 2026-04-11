@@ -328,26 +328,22 @@ def main():
             idx = max(0, min(idx, total_frames - 1))
 
             # Set qpos for each hand
-            for hand_side in hands:
+            # Bimanual: space hands apart by fixed offset (left=-0.15, right=+0.15 on X)
+            for hi, hand_side in enumerate(hands):
                 hd = hand_data[hand_side]
                 q = hd["qpos"][idx].copy()
 
-                # For bimanual: offset wrist translation by world-frame wrist position
-                # (each hand was retargeted in its own wrist-relative frame)
-                if bimanual and hasattr(hd["retargeter"], "_source_wrist_world"):
-                    wrist_world = hd["retargeter"]._source_wrist_world[idx]
-                    # Apply the same SVD+MANO rotation to get viz-frame offset
-                    # Use the precomputed R_full from source_pts_viz
-                    # Simpler: just use raw world offset (approximate but separates hands)
-                    q[0] += wrist_world[0]  # tx
-                    q[1] += wrist_world[1]  # ty
-                    q[2] += wrist_world[2]  # tz
+                if bimanual:
+                    # Fixed X offset to separate hands visually
+                    x_offset = 0.15 if hand_side == "right" else -0.15
+                    q[0] += x_offset
 
                 data.qpos[qpos_slices[hand_side]] = q
 
-            # Set object mocap — use world-frame object position for bimanual
+            # Set object mocap
             if bimanual:
-                data.mocap_pos[0] = bimanual_obj_t[idx]
+                # Object centered between hands
+                data.mocap_pos[0] = [0, 0, 0.1]
                 data.mocap_quat[0] = bimanual_obj_q_wxyz[idx]
             else:
                 first_hand = hand_data[hands[0]]
@@ -369,12 +365,11 @@ def main():
                         source_mapped = source_lm[ret.mp_indices].copy()
                         obj_pts = hd["obj_pts_viz"][idx].copy()
 
-                        # For bimanual: offset source/object overlay by wrist world pos
-                        # (robot qpos already has this offset, source overlay needs it too)
-                        if bimanual and hasattr(ret, "_source_wrist_world"):
-                            ww = ret._source_wrist_world[idx]
-                            source_mapped += ww
-                            obj_pts += ww
+                        # For bimanual: offset source/object by same fixed offset as robot
+                        if bimanual:
+                            x_offset = 0.15 if hand_side == "right" else -0.15
+                            source_mapped[:, 0] += x_offset
+                            obj_pts[:, 0] += x_offset
 
                         if vis["source"]:
                             for pt in source_mapped:
