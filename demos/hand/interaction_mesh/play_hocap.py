@@ -213,14 +213,13 @@ def main():
     model = spec.compile()
     data = mujoco.MjData(model)
 
-    # For bimanual: hide hand mesh (FK is in wrong frame for viz, overlay shows world-frame)
-    # For single hand: semi-transparent
+    # Semi-transparent hands, keep object visible
     for i in range(model.ngeom):
         geom_name = model.geom(i).name
         is_obj = "hocap" in geom_name
         is_ground = model.geom_type[i] == mujoco.mjtGeom.mjGEOM_PLANE
         if not is_obj and not is_ground:
-            model.geom_rgba[i, 3] = 0.0 if bimanual else 0.25
+            model.geom_rgba[i, 3] = 0.25
 
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
@@ -322,15 +321,39 @@ def main():
 
             idx = max(0, min(idx, total_frames - 1))
 
-            # Set qpos — retarget qpos is in wrist-relative frame, no offset needed for MuJoCo
-            # (MuJoCo model is wrist-relative too — wrist body at origin)
+            # Set qpos — transform wrist from local (SVD+MANO rotated) to world frame
+            from scipy.spatial.transform import Rotation as RotLib
             for hand_side in hands:
                 hd = hand_data[hand_side]
-                data.qpos[qpos_slices[hand_side]] = hd["qpos"][idx]
+                q = hd["qpos"][idx].copy()
+                R_inv = hd["R_inv_list"][idx]
+                wrist_w = hd["wrist_list"][idx]
+
+                # Wrist translation: world = R_inv @ local_pos + wrist_world
+                pos_local = q[:3]
+                q[:3] = R_inv @ pos_local + wrist_w
+
+                # Wrist rotation: compose R_inv with local Euler rotation
+                R_local = RotLib.from_euler("XYZ", q[3:6]).as_matrix()
+                R_world = R_inv @ R_local
+                q[3:6] = RotLib.from_matrix(R_world).as_euler("XYZ")
+
+                data.qpos[qpos_slices[hand_side]] = q
 
             # Object mocap in world frame
-            data.mocap_pos[0] = bimanual_obj_t[idx] if bimanual else [0, 0, 0]
-            data.mocap_quat[0] = bimanual_obj_q_wxyz[idx] if bimanual else [1, 0, 0, 0]
+            if bimanual:
+                data.mocap_pos[0] = bimanual_obj_t[idx]
+                data.mocap_quat[0] = bimanual_obj_q_wxyz[idx]
+            else:
+                # Single hand: object also in world frame now
+                hd0 = hand_data[hands[0]]
+                R_inv = hd0["R_inv_list"][idx]
+                wrist_w = hd0["wrist_list"][idx]
+                clip0 = hd0["clip"]
+                obj_center_world = clip0["object_t"][idx]
+                data.mocap_pos[0] = obj_center_world
+                obj_q = clip0["object_q"][idx]
+                data.mocap_quat[0] = [obj_q[3], obj_q[0], obj_q[1], obj_q[2]]
             mujoco.mj_forward(model, data)
 
             # Draw overlay — transform everything to world frame for visualization
