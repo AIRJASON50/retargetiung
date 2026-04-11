@@ -321,27 +321,33 @@ def main():
 
             idx = max(0, min(idx, total_frames - 1))
 
-            # Set qpos — drives hand mesh rendering
-            # Note: for bimanual, hand mesh is in wrist-relative frame (not world),
-            # but shows correct finger shape. Overlay spheres are in world frame.
+            # Set qpos — transform wrist to world frame so hand mesh aligns with overlay
+            from scipy.spatial.transform import Rotation as RotLib
             for hand_side in hands:
                 hd = hand_data[hand_side]
-                data.qpos[qpos_slices[hand_side]] = hd["qpos"][idx]
+                q = hd["qpos"][idx].copy()
+                R_inv = hd["R_inv_list"][idx]
+                wrist_w = hd["wrist_list"][idx]
+
+                # Wrist translation: local→world
+                q[:3] = R_inv @ q[:3] + wrist_w
+
+                # Wrist rotation: compose R_inv with local hinge rotation
+                # MuJoCo XYZ hinges are intrinsic Euler
+                R_local = RotLib.from_euler("XYZ", q[3:6]).as_matrix()
+                R_world = R_inv @ R_local
+                # Decompose back to XYZ Euler for MuJoCo hinges
+                q[3:6] = RotLib.from_matrix(R_world).as_euler("XYZ")
+
+                data.qpos[qpos_slices[hand_side]] = q
 
             # Object mocap in world frame
-            if bimanual:
-                data.mocap_pos[0] = bimanual_obj_t[idx]
-                data.mocap_quat[0] = bimanual_obj_q_wxyz[idx]
-            else:
-                # Single hand: object also in world frame now
-                hd0 = hand_data[hands[0]]
-                R_inv = hd0["R_inv_list"][idx]
-                wrist_w = hd0["wrist_list"][idx]
-                clip0 = hd0["clip"]
-                obj_center_world = clip0["object_t"][idx]
-                data.mocap_pos[0] = obj_center_world
-                obj_q = clip0["object_q"][idx]
-                data.mocap_quat[0] = [obj_q[3], obj_q[0], obj_q[1], obj_q[2]]
+            hd0 = hand_data[hands[0]]
+            clip0 = hd0["clip"]
+            obj_center_world = clip0["object_t"][idx]
+            data.mocap_pos[0] = obj_center_world
+            obj_q = clip0["object_q"][idx]
+            data.mocap_quat[0] = [obj_q[3], obj_q[0], obj_q[1], obj_q[2]]
             mujoco.mj_forward(model, data)
 
             # Draw overlay — transform everything to world frame for visualization
