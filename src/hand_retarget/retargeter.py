@@ -354,13 +354,14 @@ class InteractionMeshHandRetargeter:
 
         qpos_seq = np.zeros((T, self.nq))
         q_prev = self.hand.get_default_qpos()
+        self._source_wrist_world = landmarks_raw[:, 0, :].copy()
 
-        # For floating base: initialize wrist position from source wrist world coords
-        # (preprocessed landmarks are wrist-relative, but the SVD+MANO rotation
-        #  makes the wrist frame differ from world frame — start at origin is correct
-        #  for single hand. For bimanual, we need world-frame offset.)
-        # Store the source wrist world position for viz reference
-        self._source_wrist_world = landmarks_raw[:, 0, :].copy()  # (T, 3)
+        # First frame warm-up: solve with larger step_size and more iterations
+        # to converge from default pose to source pose (may need large wrist rotation)
+        saved_step = self.config.step_size
+        saved_n_iter = self.config.n_iter_first
+        self.config.step_size = 0.5   # 5x larger trust region for first frame
+        self.config.n_iter_first = 200  # 4x more iterations
 
         for t in tqdm(range(T), desc="Retargeting (obj mode)"):
             # Preprocess hand landmarks (center to wrist + SVD + MANO + scale)
@@ -408,5 +409,10 @@ class InteractionMeshHandRetargeter:
             )
             qpos_seq[t] = q_opt
             q_prev = q_opt
+
+            # Restore normal parameters after first frame warm-up
+            if t == 0:
+                self.config.step_size = saved_step
+                self.config.n_iter_first = saved_n_iter
 
         return qpos_seq
