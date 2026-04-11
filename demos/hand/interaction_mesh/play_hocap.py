@@ -329,13 +329,12 @@ def main():
                 R_inv = hd["R_inv_list"][idx]
                 wrist_w = hd["wrist_list"][idx]
 
-                # Wrist translation: local→world (right multiply R_inv = R.T)
+                # Wrist translation: local→world
                 q[:3] = q[:3] @ R_inv + wrist_w
-
-                # Wrist rotation: compose with R_inv
-                R_local = RotLib.from_euler("XYZ", q[3:6]).as_matrix()
-                R_world = R_local @ R_inv  # right multiply
-                q[3:6] = RotLib.from_matrix(R_world).as_euler("XYZ")
+                # Wrist rotation: keep in preprocessed frame
+                # (finger joints are relative to wrist — changing wrist rotation
+                #  would misalign fingers. Mesh shows correct finger shape
+                #  but wrist orientation is in preprocessed frame, not world.)
 
                 data.qpos[qpos_slices[hand_side]] = q
 
