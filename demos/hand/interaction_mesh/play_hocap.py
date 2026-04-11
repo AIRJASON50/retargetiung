@@ -112,40 +112,113 @@ def main():
 
     qpos_cache = retargeter.retarget_hocap_sequence(clip, use_semantic_weights=args.semantic_weight)
 
-    # Also precompute per-frame object points in wrist-relative frame (for visualization)
+    # Precompute per-frame transforms (wrist-relative frame, matching retargeting)
     from wuji_retargeting.mediapipe import apply_mediapipe_transformations
-    obj_pts_viz = []
-    source_pts_viz = []
+    from scipy.spatial.transform import Rotation
+
+    obj_pts_viz = []     # (T, M, 3) object surface points in viz frame
+    source_pts_viz = []  # (T, 21, 3) hand landmarks in viz frame
+    obj_pose_viz = []    # (T, (pos, quat_wxyz)) object center pose in viz frame
+
     for t in range(total_frames):
         lm_raw = clip["landmarks"][t]
         wrist = lm_raw[0]
-        # Object in wrist-relative + same transform as hand
-        obj_world = transform_object_points(clip["object_pts_local"], clip["object_q"][t], clip["object_t"][t])
-        obj_rel = obj_world - wrist
+
+        # Compute the SVD+MANO rotation from raw→preprocessed
         raw_centered = lm_raw - wrist
         transformed = apply_mediapipe_transformations(lm_raw.copy(), args.hand)
         R_t, _, _, _ = np.linalg.lstsq(raw_centered[1:6], transformed[1:6], rcond=None)
-        obj_t = obj_rel @ R_t
+
         angles = [config.mediapipe_rotation.get(k, 0) for k in "xyz"]
         if any(a != 0 for a in angles):
-            from scipy.spatial.transform import Rotation
             R_extra = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
-            obj_t = obj_t @ R_extra.T
-        obj_pts_viz.append(obj_t)
+            R_full = R_t @ R_extra.T
+        else:
+            R_full = R_t
+
+        # Object surface points → viz frame
+        obj_world = transform_object_points(clip["object_pts_local"], clip["object_q"][t], clip["object_t"][t])
+        obj_rel = obj_world - wrist
+        obj_viz = obj_rel @ R_full
+        obj_pts_viz.append(obj_viz)
+
+        # Object center pose → viz frame
+        obj_center_rel = clip["object_t"][t] - wrist
+        obj_center_viz = obj_center_rel @ R_full
+        # Object rotation in viz frame
+        R_obj_world = Rotation.from_quat(clip["object_q"][t]).as_matrix()
+        R_obj_viz = R_full.T @ R_obj_world  # compose rotations
+        q_obj_viz = Rotation.from_matrix(R_obj_viz).as_quat()  # xyzw
+        q_obj_wxyz = [q_obj_viz[3], q_obj_viz[0], q_obj_viz[1], q_obj_viz[2]]  # MuJoCo uses wxyz
+        obj_pose_viz.append((obj_center_viz, np.array(q_obj_wxyz)))
+
         source_pts_viz.append(transformed)
 
     avg_dt = 1.0 / clip["fps"]
 
-    # MuJoCo viewer (use the retargeter's model for rendering)
-    model = retargeter.hand.model
-    data = retargeter.hand.data
+    # Build MuJoCo model with object mesh for visualization
+    # Rebuild from scene XML with MjSpec to inject the HO-Cap object mesh
+    from scene_builder.hand_builder import load_scene_model
+    obj_mesh_path = clip["mesh_path"]
 
-    # Semi-transparent hand
+    # Load base scene model (hand only)
+    spec = mujoco.MjSpec.from_file(args.scene)
+
+    # Inject object as a mocap body (position updated each frame)
+    obj_body = spec.worldbody.add_body()
+    obj_body.name = "hocap_object"
+    obj_body.mocap = True
+
+    # Add object mesh asset and geom
+    obj_mesh_asset = spec.add_mesh()
+    obj_mesh_asset.name = "hocap_obj_mesh"
+    obj_mesh_asset.file = str(Path(obj_mesh_path).resolve())
+
+    obj_geom = obj_body.add_geom()
+    obj_geom.name = "hocap_obj_geom"
+    obj_geom.type = mujoco.mjtGeom.mjGEOM_MESH
+    obj_geom.meshname = "hocap_obj_mesh"
+    obj_geom.rgba = [0.6, 0.4, 0.2, 0.5]  # semi-transparent brown
+    obj_geom.contype = 0
+    obj_geom.conaffinity = 0
+
+    # Inject wrist6dof + fingertip sites via hand_builder
+    from scene_builder.hand_builder import _inject_wrist6dof_mode, _inject_fingertip_sites
+    _inject_fingertip_sites(spec, args.hand)
+    _inject_wrist6dof_mode(spec)
+
+    model = spec.compile()
+    data = mujoco.MjData(model)
+
+    # Find mocap body id for object
+    obj_mocap_id = None
+    for i in range(model.nbody):
+        if model.body(i).name == "hocap_object":
+            obj_mocap_id = i
+            break
+    # Mocap body index (for data.mocap_pos / data.mocap_quat)
+    mocap_idx = 0  # should be the only mocap body
+
+    # Semi-transparent hand, keep object visible
     for i in range(model.ngeom):
-        if model.geom_type[i] != mujoco.mjtGeom.mjGEOM_PLANE:
+        geom_name = model.geom(i).name
+        geom_type = model.geom_type[i]
+        is_obj = "hocap" in geom_name
+        is_ground = geom_type == mujoco.mjtGeom.mjGEOM_PLANE
+        if not is_obj and not is_ground:
             model.geom_rgba[i, 3] = 0.25
+
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
+
+    # Map retargeter body names to this new model's body ids
+    # (retargeter used a separately compiled model, body ids may differ)
+    viz_body_ids = {}
+    viz_site_ids = {}
+    for i in range(model.nbody):
+        viz_body_ids[model.body(i).name] = i
+    for i in range(model.nsite):
+        viz_site_ids[model.site(i).name] = i
 
     data.qpos[:retargeter.nq] = qpos_cache[0]
     mujoco.mj_forward(model, data)
@@ -225,8 +298,11 @@ def main():
 
             idx = max(0, min(idx, total_frames - 1))
 
-            # Apply qpos
+            # Apply hand qpos + object mocap pose
             data.qpos[:retargeter.nq] = qpos_cache[idx]
+            obj_pos_t, obj_quat_t = obj_pose_viz[idx]
+            data.mocap_pos[mocap_idx] = obj_pos_t
+            data.mocap_quat[mocap_idx] = obj_quat_t
             mujoco.mj_forward(model, data)
 
             # Draw overlay
