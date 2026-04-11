@@ -99,6 +99,9 @@ class HandRetargetConfig:
     activate_joint_limits: bool = True
     activate_self_collision: bool = False  # Phase 1: off
 
+    # Object interaction
+    object_sample_count: int = 100  # surface points sampled from object mesh
+
     # MediaPipe preprocessing
     # Global scale: auto-computed as robot_palm_to_middle_tip / source_palm_to_middle_tip
     # Set to None for auto-compute, or a float to override

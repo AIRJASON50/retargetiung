@@ -1,0 +1,59 @@
+<mujoco model="wuji_single_hand_obj">
+  <!-- Single-hand retargeting scene with 6DOF wrist.
+       hand_builder.py injects: wrist6dof joints+actuators, fingertip sites.
+       Object not included in XML — added dynamically or via visualization overlay.
+
+       qpos layout (after wrist injection):
+         [6 wrist (tx,ty,tz,rx,ry,rz) + 20 finger] = 26 -->
+
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.01" integrator="Euler" iterations="5" ls_iterations="8">
+    <flag eulerdamp="disable"/>
+  </option>
+
+  <asset>
+    <model name="wuji_rh" file="../wujihand/xmls/wuji_rh_xml/right_mjx.xml"/>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.9" rgb2="0.9 0.95 1" width="800" height="800"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+      rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <statistic center="0 0 0.05" extent="0.3" meansize="0.01"/>
+
+  <visual>
+    <headlight diffuse=".8 .8 .8" ambient=".2 .2 .2" specular="1 1 1"/>
+    <global azimuth="180" elevation="-25" offwidth="1280" offheight="960"/>
+  </visual>
+
+  <worldbody>
+    <light pos="0 0 0.5" dir="0 0 -1"/>
+
+    <!-- Ground plane (visual only, no collision with hand) -->
+    <geom name="floor" pos="0 0 -0.1" size="0 0 0.01" type="plane"
+          material="groundplane" contype="0" conaffinity="0"/>
+
+    <!-- Right hand wrist body: 6DOF joints injected by hand_builder at runtime.
+         Initial position at origin, facing forward. -->
+    <body name="wuji_wrist" pos="0 0 0.05">
+      <attach model="wuji_rh" body="right_palm_link" prefix=""/>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <!-- Home pose: 20 finger joints (pre-wrist-injection layout).
+         After wrist injection: [6 wrist + 20 finger] = 26.
+         hand_builder._reindex_home_keyframe() handles the re-indexing. -->
+    <key name="home"
+      qpos="0.34 -0.08 0.97 0.78
+            0.93 0.17 0.96 0.80
+            1.02 -0.02 0.83 0.76
+            0.98 -0.16 0.71 0.88
+            0.83 -0.21 0.76 1.23"
+      ctrl="0.34 -0.08 0.97 0.78
+            0.93 0.17 0.96 0.80
+            1.02 -0.02 0.83 0.76
+            0.98 -0.16 0.71 0.88
+            0.83 -0.21 0.76 1.23"/>
+  </keyframe>
+</mujoco>

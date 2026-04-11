@@ -149,3 +149,41 @@ retargeting/
 │   └── improvement_plan.md      # 本文件
 └── lib/                         # 参考库 (gitignore)
 ```
+
+---
+
+## Object Mode 架构笔记 (Phase 2 准备)
+
+### 关键发现: 需要浮动基座
+
+HO-Cap 数据中手是世界坐标系的浮动手, 不是固定基座.
+OmniRetarget 的 object_interaction 模式在物体坐标系下做优化 (手和物体都变换到物体局部坐标).
+需要给 WujiHand 加 6DOF 虚拟手腕关节 (3 slide + 3 hinge = 26 DOF).
+
+### 参考实现
+
+`/home/l/ws/RL/playground/source/wujihand_tasks/robots/hand_builder.py`:
+- `_inject_wrist6dof_mode()`: 通过 MjSpec 在 wrist body 上注入 6 个虚拟关节
+- 3 slide (tx, ty, tz): range [-0.5, 0.5]m
+- 3 hinge (rx, ry, rz): range [-π, π]
+- 每个关节有 PD actuator
+
+`/home/l/ws/RL/playground/source/wujihand_tasks/assets/task_scene/bh_motion_track/scene_physics.xml`:
+- 双手 + cube 场景示例
+- wrist body 有初始位姿, 关节由 hand_builder 注入
+- qpos layout: [6 wrist + 20 finger + 7 cube_freejoint]
+
+### 坐标系策略 (和 OmniRetarget 一致)
+
+- robot_only (object_name == "ground"): 世界坐标系
+- object_interaction: 物体局部坐标系
+  - source: transform_points_world_to_local(obj_quat, obj_trans, hand_pts)
+  - robot: obj_rot_inv @ (FK_world - obj_pos), J = obj_rot_inv @ J_world
+  - 物体采样点: 直接用 mesh 局部坐标 (不变换)
+
+### 需要新建的
+
+1. 单手 obj mode 场景 XML (参考 bh_motion_track)
+2. 新的 MuJoCoHandModel 子类或扩展, 支持 26 DOF (wrist6dof + finger)
+3. retargeter.py 支持物体坐标系变换
+4. HO-Cap 可视化脚本

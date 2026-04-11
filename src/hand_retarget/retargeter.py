@@ -121,34 +121,43 @@ class InteractionMeshHandRetargeter:
         target_laplacian: np.ndarray,
         adj_list: list[list[int]],
         semantic_weights: np.ndarray | None = None,
+        object_pts_world: np.ndarray | None = None,
     ) -> tuple[np.ndarray, float]:
         """
         Single SQP iteration: linearize and solve SOCP sub-problem.
 
-        Matches OmniRetarget's solve_single_iteration:
-        - Recompute Laplacian matrix from current robot positions each iteration
-        - Apply laplacian_weight to deformation cost
-        - Smoothness cost on dq
-
         Args:
             q_current: (nq,) current joint angles (linearization point)
             q_prev_frame: (nq,) joint angles from previous frame (for smoothness)
-            target_laplacian: (N, 3) target Laplacian coordinates from source
+            target_laplacian: (V, 3) target Laplacian coordinates from source
             adj_list: adjacency list from Delaunay
+            semantic_weights: (V,) per-keypoint weights, or None for uniform
+            object_pts_world: (M, 3) object surface points in world frame, or None
 
         Returns:
             (q_new, cost): updated joint angles and optimization cost
         """
-        V = self.n_keypoints
+        n_hand = self.n_keypoints
 
         # FK at current q
         self.hand.forward(q_current)
-        robot_pts = self._get_robot_keypoints()  # (V, 3)
+        hand_pts = self._get_robot_keypoints()  # (n_hand, 3)
 
-        # Jacobians for robot keypoints
-        J_V = self._get_robot_jacobians()  # (3V, nq)
+        # Build combined vertices: hand + object
+        if object_pts_world is not None:
+            robot_pts = np.vstack([hand_pts, object_pts_world])  # (n_hand+M, 3)
+        else:
+            robot_pts = hand_pts
 
-        # Recompute Laplacian matrix from current robot positions (matches OmniRetarget L560)
+        V = len(robot_pts)
+
+        # Jacobians: hand points have J, object points have J=0
+        J_hand = self._get_robot_jacobians()  # (3*n_hand, nq)
+        J_V = np.zeros((3 * V, self.nq))
+        J_V[:3 * n_hand, :] = J_hand
+        # J_V[3*n_hand:, :] = 0  (object points, already zero)
+
+        # Recompute Laplacian matrix from current positions
         L = calculate_laplacian_matrix(robot_pts, adj_list, uniform_weight=True)
         L_sp = sp.csr_matrix(L)
         Kron = sp.kron(L_sp, sp.eye(3, format="csr"), format="csr")
@@ -219,45 +228,59 @@ class InteractionMeshHandRetargeter:
         q_prev: np.ndarray,
         is_first_frame: bool = False,
         use_semantic_weights: bool = False,
+        object_pts_world: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Retarget a single frame of MediaPipe landmarks to joint angles.
-
-        Matches OmniRetarget retarget_motion loop:
-        - Rebuild Delaunay every frame from source keypoints
-        - Compute target Laplacian from source vertices + adjacency
-        - Run SQP iterations with per-iteration L matrix update
 
         Args:
             landmarks: (21, 3) preprocessed landmarks
             q_prev: (nq,) joint angles from previous frame (warm start)
             is_first_frame: if True, use more iterations
+            use_semantic_weights: enable pinch-aware loss weighting
+            object_pts_world: (M, 3) object surface points in world frame, or None
 
         Returns:
             (nq,) optimized joint angles
         """
         # Extract mapped keypoints
-        source_pts = self._extract_source_keypoints(landmarks)  # (16, 3)
+        source_pts = self._extract_source_keypoints(landmarks)  # (n_hand, 3)
 
-        # Rebuild Delaunay every frame (OmniRetarget L385-388)
-        _, simplices = create_interaction_mesh(source_pts)
-        adj_list = get_adjacency_list(simplices, self.n_keypoints)
+        # Combine hand + object points for mesh construction
+        if object_pts_world is not None:
+            source_pts_full = np.vstack([source_pts, object_pts_world])
+        else:
+            source_pts_full = source_pts
+
+        V = len(source_pts_full)
+
+        # Rebuild Delaunay every frame on combined point set
+        _, simplices = create_interaction_mesh(source_pts_full)
+        adj_list = get_adjacency_list(simplices, V)
         self._adj_list = adj_list  # cache for visualization
 
-        # Compute target Laplacian from source (OmniRetarget L411)
-        target_laplacian = calculate_laplacian_coordinates(source_pts, adj_list)
+        # Compute target Laplacian from combined source
+        target_laplacian = calculate_laplacian_coordinates(source_pts_full, adj_list)
 
-        # Semantic weights (only if enabled)
-        sem_w = self._compute_semantic_weights(source_pts) if use_semantic_weights else None
+        # Semantic weights (on full vertex set)
+        if use_semantic_weights:
+            sem_w_hand = self._compute_semantic_weights(source_pts)
+            if object_pts_world is not None:
+                # Object points get base weight (no semantic boost)
+                sem_w = np.concatenate([sem_w_hand, np.ones(len(object_pts_world))])
+            else:
+                sem_w = sem_w_hand
+        else:
+            sem_w = None
 
-        # SQP iterations (OmniRetarget L727-747)
+        # SQP iterations
         n_iter = self.config.n_iter_first if is_first_frame else self.config.n_iter
         q_current = q_prev.copy()
         last_cost = float("inf")
 
         for _ in range(n_iter):
             q_current, cost = self.solve_single_iteration(
-                q_current, q_prev, target_laplacian, adj_list, sem_w
+                q_current, q_prev, target_laplacian, adj_list, sem_w, object_pts_world
             )
             if abs(last_cost - cost) < 1e-8:
                 break
