@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Data files (large, not tracked)
+*.pkl
+data/cache/
+data/hocap/
+
+# Lib (external repos, cloned separately)
+lib/
+
+# Logs
+log/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
