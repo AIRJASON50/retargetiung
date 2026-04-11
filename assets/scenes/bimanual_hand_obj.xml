@@ -1,0 +1,52 @@
+<mujoco model="wuji_bimanual_hand_obj">
+  <!-- Bimanual retargeting scene with 6DOF wrists.
+       hand_builder.py injects per-hand: wrist6dof joints+actuators, fingertip sites.
+
+       qpos layout (after wrist injection):
+         [6 rh_wrist + 20 rh_finger + 6 lh_wrist + 20 lh_finger] = 52 -->
+
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.01" integrator="Euler" iterations="5" ls_iterations="8">
+    <flag eulerdamp="disable"/>
+  </option>
+
+  <asset>
+    <model name="wuji_rh" file="../wujihand/xmls/wuji_rh_xml/right_mjx.xml"/>
+    <model name="wuji_lh" file="../wujihand/xmls/wuji_lh_xml/left_mjx.xml"/>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.9" rgb2="0.9 0.95 1" width="800" height="800"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+      rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <statistic center="0 0 0.05" extent="0.4" meansize="0.01"/>
+
+  <visual>
+    <headlight diffuse=".8 .8 .8" ambient=".2 .2 .2" specular="1 1 1"/>
+    <global azimuth="180" elevation="-25" offwidth="1280" offheight="960"/>
+  </visual>
+
+  <worldbody>
+    <light pos="0 0 0.5" dir="0 0 -1"/>
+    <geom name="floor" pos="0 0 -0.1" size="0 0 0.01" type="plane"
+          material="groundplane" contype="0" conaffinity="0"/>
+
+    <!-- Right hand -->
+    <body name="wuji_rh_wrist" pos="0 0 0">
+      <attach model="wuji_rh" body="right_palm_link" prefix="rh_"/>
+    </body>
+
+    <!-- Left hand -->
+    <body name="wuji_lh_wrist" pos="0 0 0">
+      <attach model="wuji_lh" body="left_palm_link" prefix="lh_"/>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <key name="home"
+      qpos="0.34 -0.08 0.97 0.78 0.93 0.17 0.96 0.80 1.02 -0.02 0.83 0.76 0.98 -0.16 0.71 0.88 0.83 -0.21 0.76 1.23
+            0.34 -0.08 0.97 0.78 0.93 0.17 0.96 0.80 1.02 -0.02 0.83 0.76 0.98 -0.16 0.71 0.88 0.83 -0.21 0.76 1.23"
+      ctrl="0.34 -0.08 0.97 0.78 0.93 0.17 0.96 0.80 1.02 -0.02 0.83 0.76 0.98 -0.16 0.71 0.88 0.83 -0.21 0.76 1.23
+            0.34 -0.08 0.97 0.78 0.93 0.17 0.96 0.80 1.02 -0.02 0.83 0.76 0.98 -0.16 0.71 0.88 0.83 -0.21 0.76 1.23"/>
+  </keyframe>
+</mujoco>

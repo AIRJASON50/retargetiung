@@ -367,7 +367,9 @@ def _set_collision_group(spec: mujoco.MjSpec, body_name: str, contype: int, cona
         for child in body.bodies:
             _recurse(child)
 
-    _recurse(spec.body(body_name))
+    body = spec.body(body_name)
+    if body is not None:
+        _recurse(body)
 
 
 def _set_cube_collision_group(spec: mujoco.MjSpec, body_name: str = "cube") -> None:
@@ -389,7 +391,9 @@ def _set_cube_collision_group(spec: mujoco.MjSpec, body_name: str = "cube") -> N
         for child in body.bodies:
             _recurse(child)
 
-    _recurse(spec.body(body_name))
+    body = spec.body(body_name)
+    if body is not None:
+        _recurse(body)
 
 
 def _parse_pos_str(pos_str: str) -> list[float]:
