@@ -1,4 +1,4 @@
-<mujoco model="wuji_single_hand_obj">
+<mujoco model="wuji_single_hand_obj_left">
   <!-- Single-hand retargeting scene with 6DOF wrist.
        hand_builder.py injects: wrist6dof joints+actuators, fingertip sites.
        Object not included in XML — added dynamically or via visualization overlay.
@@ -12,7 +12,7 @@
   </option>
 
   <asset>
-    <model name="wuji_rh" file="../wujihand/xmls/wuji_rh_xml/right_mjx.xml"/>
+    <model name="wuji_lh" file="../wujihand/xmls/wuji_lh_xml/left_mjx.xml"/>
     <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.9" rgb2="0.9 0.95 1" width="800" height="800"/>
     <texture type="2d" name="groundplane" builtin="checker" mark="edge"
       rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
@@ -36,7 +36,7 @@
     <!-- Right hand wrist body: 6DOF joints injected by hand_builder at runtime.
          Initial position at origin, facing forward. -->
     <body name="wuji_wrist" pos="0 0 0">
-      <attach model="wuji_rh" body="right_palm_link" prefix=""/>
+      <attach model="wuji_lh" body="left_palm_link" prefix=""/>
     </body>
   </worldbody>
 
