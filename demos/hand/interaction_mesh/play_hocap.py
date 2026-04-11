@@ -213,15 +213,13 @@ def main():
     model = spec.compile()
     data = mujoco.MjData(model)
 
-    # Single hand: semi-transparent mesh visible
-    # Bimanual: hide hand mesh (world-frame transform of wrist Euler is unreliable),
-    # show only keypoint spheres in world frame
+    # Semi-transparent hands (both single and bimanual)
     for i in range(model.ngeom):
         geom_name = model.geom(i).name
         is_obj = "hocap" in geom_name
         is_ground = model.geom_type[i] == mujoco.mjtGeom.mjGEOM_PLANE
         if not is_obj and not is_ground:
-            model.geom_rgba[i, 3] = 0.25 if not bimanual else 0.0
+            model.geom_rgba[i, 3] = 0.25
 
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
@@ -323,16 +321,12 @@ def main():
 
             idx = max(0, min(idx, total_frames - 1))
 
-            # Set qpos
+            # Set qpos — drives hand mesh rendering
+            # Note: for bimanual, hand mesh is in wrist-relative frame (not world),
+            # but shows correct finger shape. Overlay spheres are in world frame.
             for hand_side in hands:
                 hd = hand_data[hand_side]
-                if bimanual:
-                    # Bimanual: hand mesh hidden, qpos only used for FK in overlay
-                    # Don't set into viz model (it would be in wrong frame)
-                    pass
-                else:
-                    # Single hand: qpos directly drives visible mesh
-                    data.qpos[qpos_slices[hand_side]] = hd["qpos"][idx]
+                data.qpos[qpos_slices[hand_side]] = hd["qpos"][idx]
 
             # Object mocap in world frame
             if bimanual:
