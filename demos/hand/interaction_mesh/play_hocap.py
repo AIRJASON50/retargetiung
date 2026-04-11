@@ -366,8 +366,15 @@ def main():
                         hd = hand_data[hand_side]
                         ret = hd["retargeter"]
                         source_lm = hd["source_pts_viz"][idx]
-                        source_mapped = source_lm[ret.mp_indices]
-                        obj_pts = hd["obj_pts_viz"][idx]
+                        source_mapped = source_lm[ret.mp_indices].copy()
+                        obj_pts = hd["obj_pts_viz"][idx].copy()
+
+                        # For bimanual: offset source/object overlay by wrist world pos
+                        # (robot qpos already has this offset, source overlay needs it too)
+                        if bimanual and hasattr(ret, "_source_wrist_world"):
+                            ww = ret._source_wrist_world[idx]
+                            source_mapped += ww
+                            obj_pts += ww
 
                         if vis["source"]:
                             for pt in source_mapped:
@@ -376,7 +383,9 @@ def main():
                                 _add_sphere(viewer.user_scn, pt, COL_OBJ_PTS, 0.003)
 
                         if vis["robot"]:
-                            ret.hand.forward(hd["qpos"][idx])
+                            # Use viz model body positions (already has wrist offset)
+                            q_hand = data.qpos[qpos_slices[hand_side]]
+                            ret.hand.forward(q_hand)
                             for name in ret.body_names:
                                 pt = ret.hand.get_body_pos(name)
                                 _add_sphere(viewer.user_scn, pt, COL_ROBOT)
