@@ -145,6 +145,9 @@ def main():
     parser.add_argument("--no-mesh", action="store_true", help="Hide mesh topology overlay")
     parser.add_argument("--no-source", action="store_true", help="Hide source MediaPipe keypoints")
     parser.add_argument("--live", action="store_true", help="Live retargeting (no precompute, no rewind)")
+    parser.add_argument("--fixed-topology", action="store_true", help="Use fixed topology from first frame (Ho 2010)")
+    parser.add_argument("--distance-weight", action="store_true", help="Use distance-based Laplacian weights (Ho 2010)")
+    parser.add_argument("--semantic-weight", action="store_true", help="Use pinch-aware semantic weights on Laplacian loss")
     parser.add_argument("--collision", action="store_true", help="Enable MuJoCo collision detection and contact rendering")
     args = parser.parse_args()
 
@@ -191,45 +194,121 @@ def main():
     cached_adj_list = None
     cached_edges = []
 
-    # Cache file path: data/<pkl_stem>_im_cache.npz
+    # Cache file path: data/<pkl_stem>_{mode}_cache.npz
     CACHE_DIR = PROJECT_DIR / "data" / "cache"
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_path = CACHE_DIR / f"{Path(args.pkl).stem}_im_cache.npz"
+    cache_suffix = "im"
+    if args.fixed_topology:
+        cache_suffix += "_fixed"
+    if args.distance_weight:
+        cache_suffix += "_distw"
+    if args.semantic_weight:
+        cache_suffix += "_semw"
+    cache_path = CACHE_DIR / f"{Path(args.pkl).stem}_{cache_suffix}_cache.npz"
 
     if not live_mode:
         if cache_path.exists():
-            # Load cached results
             cached = np.load(cache_path)
             qpos_cache = cached["qpos"]
             if len(qpos_cache) == total_frames:
                 print(f"Loaded cache: {cache_path} ({total_frames} frames)")
-                # Still need topology for mesh visualization — rebuild from first frame
-                retargeter.retarget_frame(proc_seq[0], retargeter.hand.get_default_qpos(), is_first_frame=True)
-                cached_adj_list = retargeter._adj_list
-                cached_edges = _collect_mesh_edges(cached_adj_list) if cached_adj_list else []
             else:
                 print(f"Cache frame count mismatch ({len(qpos_cache)} vs {total_frames}), re-computing...")
                 qpos_cache = None
 
         if qpos_cache is None:
-            # No cache found — compute and save automatically
             import time as _time
-            print(f"No cache found, pre-retargeting {total_frames} frames...")
+            use_uniform = not args.distance_weight
+            parts = []
+            if args.fixed_topology: parts.append("fixed topology")
+            if args.distance_weight: parts.append("distance weight")
+            if args.semantic_weight: parts.append("semantic weight")
+            mode_label = " + ".join(parts) if parts else "per-frame Delaunay"
+            print(f"No cache found, pre-retargeting {total_frames} frames ({mode_label})...")
             qpos_cache = np.zeros((total_frames, retargeter.nq))
             q_prev = retargeter.hand.get_default_qpos()
             t0 = _time.time()
-            for t in range(total_frames):
-                q_opt = retargeter.retarget_frame(proc_seq[t], q_prev, is_first_frame=(t == 0))
-                qpos_cache[t] = q_opt
-                q_prev = q_opt
-                if (t + 1) % 500 == 0:
-                    fps = (t + 1) / (_time.time() - t0)
-                    print(f"  {t + 1}/{total_frames} ({fps:.0f} fps)")
-            print(f"Pre-retargeting done in {_time.time() - t0:.1f}s")
-            cached_adj_list = retargeter._adj_list
-            cached_edges = _collect_mesh_edges(cached_adj_list) if cached_adj_list else []
 
-            # Save cache
+            if args.fixed_topology:
+                from hand_retarget.mesh_utils import calculate_laplacian_coordinates, calculate_laplacian_matrix
+                from scipy import sparse as sp
+                import cvxpy as cp
+
+                source_pts_0 = retargeter._extract_source_keypoints(proc_seq[0])
+                _, simplices = create_interaction_mesh(source_pts_0)
+                fixed_adj = get_adjacency_list(simplices, retargeter.n_keypoints)
+
+                for t in range(total_frames):
+                    source_pts = retargeter._extract_source_keypoints(proc_seq[t])
+                    target_lap = calculate_laplacian_coordinates(source_pts, fixed_adj, uniform_weight=use_uniform)
+
+                    n_iter = 50 if t == 0 else 10
+                    q_current = q_prev.copy()
+                    last_cost = float("inf")
+                    for _ in range(n_iter):
+                        # Custom solve with weight scheme
+                        retargeter.hand.forward(q_current)
+                        robot_pts = retargeter._get_robot_keypoints()
+                        J_V = retargeter._get_robot_jacobians()
+
+                        L = calculate_laplacian_matrix(robot_pts, fixed_adj, uniform_weight=use_uniform)
+                        L_sp = sp.csr_matrix(L)
+                        Kron = sp.kron(L_sp, sp.eye(3, format="csr"), format="csr")
+                        J_L = Kron @ J_V
+
+                        lap0 = L_sp @ robot_pts
+                        lap0_vec = lap0.reshape(-1)
+                        target_lap_vec = target_lap.reshape(-1)
+
+                        V = retargeter.n_keypoints
+                        if args.semantic_weight:
+                            sem_w = retargeter._compute_semantic_weights(source_pts)
+                            w_v = retargeter.laplacian_weight * sem_w
+                        else:
+                            w_v = retargeter.laplacian_weight * np.ones(V)
+                        sqrt_w3 = np.sqrt(np.repeat(w_v, 3))
+
+                        dq = cp.Variable(retargeter.nq, name="dq")
+                        lap_var = cp.Variable(3 * V, name="lap")
+
+                        constraints = [
+                            cp.Constant(J_L) @ dq - lap_var == -lap0_vec,
+                            dq >= retargeter.q_lb - q_current,
+                            dq <= retargeter.q_ub - q_current,
+                            cp.SOC(retargeter.config.step_size, dq),
+                        ]
+                        obj_terms = [
+                            cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)),
+                            retargeter.config.smooth_weight * cp.sum_squares(dq - (q_prev - q_current)),
+                        ]
+                        problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
+                        problem.solve(solver=cp.CLARABEL, verbose=False)
+                        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+                            break
+                        q_current = q_current + dq.value
+                        q_current = np.clip(q_current, retargeter.q_lb, retargeter.q_ub)
+                        if abs(last_cost - problem.value) < 1e-8:
+                            break
+                        last_cost = problem.value
+
+                    qpos_cache[t] = q_current
+                    q_prev = q_current
+                    if (t + 1) % 500 == 0:
+                        fps = (t + 1) / (_time.time() - t0)
+                        print(f"  {t + 1}/{total_frames} ({fps:.0f} fps)")
+                retargeter._adj_list = fixed_adj
+            else:
+                # Per-frame Delaunay (default)
+                for t in range(total_frames):
+                    q_opt = retargeter.retarget_frame(proc_seq[t], q_prev, is_first_frame=(t == 0),
+                                                      use_semantic_weights=args.semantic_weight)
+                    qpos_cache[t] = q_opt
+                    q_prev = q_opt
+                    if (t + 1) % 500 == 0:
+                        fps = (t + 1) / (_time.time() - t0)
+                        print(f"  {t + 1}/{total_frames} ({fps:.0f} fps)")
+
+            print(f"Pre-retargeting done in {_time.time() - t0:.1f}s")
             np.savez(cache_path, qpos=qpos_cache)
             print(f"Saved cache: {cache_path}")
 

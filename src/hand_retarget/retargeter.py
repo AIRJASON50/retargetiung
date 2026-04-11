@@ -56,6 +56,15 @@ class InteractionMeshHandRetargeter:
         # Config allows override if ever needed for a differently-sized hand
         self.global_scale = self.config.global_scale if self.config.global_scale is not None else 1.0
 
+        # Semantic weight config
+        self._pinch_d_min = 0.010   # 10mm: full pinch
+        self._pinch_d_max = 0.030   # 30mm: approaching
+        self._pinch_max_boost = 5.0
+
+        # Thumb tip and other fingertip indices in mapped array
+        self._thumb_tip_mapped = self.mp_indices.index(4)
+        self._other_tips_mapped = [self.mp_indices.index(i) for i in [8, 12, 16, 20]]
+
         # Cached topology per frame (rebuilt each frame from source points)
         self._adj_list = None
 
@@ -77,6 +86,26 @@ class InteractionMeshHandRetargeter:
         """Extract the mapped keypoints from full 21-point MediaPipe landmarks."""
         return landmarks[self.mp_indices]
 
+    def _compute_semantic_weights(self, source_pts: np.ndarray) -> np.ndarray:
+        """
+        Compute per-keypoint weights based on pinch proximity.
+        Only monitors thumb-to-other-fingertip pairs (4 pairs).
+        Non-pinch points get weight 1.0, pinch points get up to max_boost.
+        """
+        w = np.ones(self.n_keypoints)
+
+        for tip_mapped in self._other_tips_mapped:
+            dist = np.linalg.norm(
+                source_pts[self._thumb_tip_mapped] - source_pts[tip_mapped]
+            )
+            if dist < self._pinch_d_max:
+                t = (self._pinch_d_max - dist) / (self._pinch_d_max - self._pinch_d_min)
+                boost = 1.0 + (self._pinch_max_boost - 1.0) * np.clip(t, 0.0, 1.0)
+                w[self._thumb_tip_mapped] = max(w[self._thumb_tip_mapped], boost)
+                w[tip_mapped] = max(w[tip_mapped], boost)
+
+        return w
+
     def _get_robot_keypoints(self) -> np.ndarray:
         """Get robot body positions for mapped keypoints. Returns (N, 3)."""
         return self.hand.get_body_positions(self.body_names)
@@ -91,6 +120,7 @@ class InteractionMeshHandRetargeter:
         q_prev_frame: np.ndarray,
         target_laplacian: np.ndarray,
         adj_list: list[list[int]],
+        semantic_weights: np.ndarray | None = None,
     ) -> tuple[np.ndarray, float]:
         """
         Single SQP iteration: linearize and solve SOCP sub-problem.
@@ -129,8 +159,11 @@ class InteractionMeshHandRetargeter:
         lap0_vec = lap0.reshape(-1)  # (3V,)
         target_lap_vec = target_laplacian.reshape(-1)  # (3V,)
 
-        # Laplacian weight (OmniRetarget: w_v = laplacian_weights * ones(V))
-        w_v = self.laplacian_weight * np.ones(V)
+        # Laplacian weight: base weight * semantic weight per keypoint
+        if semantic_weights is not None:
+            w_v = self.laplacian_weight * semantic_weights
+        else:
+            w_v = self.laplacian_weight * np.ones(V)
         sqrt_w3 = np.sqrt(np.repeat(w_v, 3))
 
         # Decision variables
@@ -185,6 +218,7 @@ class InteractionMeshHandRetargeter:
         landmarks: np.ndarray,
         q_prev: np.ndarray,
         is_first_frame: bool = False,
+        use_semantic_weights: bool = False,
     ) -> np.ndarray:
         """
         Retarget a single frame of MediaPipe landmarks to joint angles.
@@ -213,6 +247,9 @@ class InteractionMeshHandRetargeter:
         # Compute target Laplacian from source (OmniRetarget L411)
         target_laplacian = calculate_laplacian_coordinates(source_pts, adj_list)
 
+        # Semantic weights (only if enabled)
+        sem_w = self._compute_semantic_weights(source_pts) if use_semantic_weights else None
+
         # SQP iterations (OmniRetarget L727-747)
         n_iter = self.config.n_iter_first if is_first_frame else self.config.n_iter
         q_current = q_prev.copy()
@@ -220,7 +257,7 @@ class InteractionMeshHandRetargeter:
 
         for _ in range(n_iter):
             q_current, cost = self.solve_single_iteration(
-                q_current, q_prev, target_laplacian, adj_list
+                q_current, q_prev, target_laplacian, adj_list, sem_w
             )
             if abs(last_cost - cost) < 1e-8:
                 break
