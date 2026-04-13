@@ -333,18 +333,21 @@ class InteractionMeshHandRetargeter:
         """
         Retarget a HO-Cap clip with object interaction.
 
-        Object points are transformed to wrist-relative coordinates each frame
-        (matching the hand preprocessing which centers at wrist).
+        Preprocessing: wrist-center landmarks + rotate to robot frame.
+        Primary path: wrist_q (6D pose from data) + OPERATOR2MANO (convention fix).
+        Fallback: SVD estimation + OPERATOR2MANO (when wrist_q unavailable).
 
         Args:
             clip: dict from load_hocap_clip() with keys:
-                landmarks, object_pts_local, object_t, object_q, fps
+                landmarks, object_pts_local, object_t, object_q,
+                wrist_q (optional), fps
             use_semantic_weights: enable pinch-aware weighting
 
         Returns:
             qpos_seq: (T, nq) joint angle sequence
         """
-        from .mediapipe_io import preprocess_landmarks, transform_object_points
+        from .mediapipe_io import transform_object_points
+        from scipy.spatial.transform import Rotation as RotLib
 
         landmarks_raw = clip["landmarks"]       # (T, 21, 3) world frame
         obj_pts_local = clip["object_pts_local"]  # (M, 3) mesh local
@@ -356,51 +359,68 @@ class InteractionMeshHandRetargeter:
         q_prev = self.hand.get_default_qpos()
         self._source_wrist_world = landmarks_raw[:, 0, :].copy()
 
-        # Wrist translation is fixed at origin (source wrist = 0 after preprocessing).
-        # Lock wrist tx/ty/tz to 0, only optimize wrist rotation + fingers.
-        # This prevents the optimizer from drifting wrist away from the aligned position.
+        # Lock wrist translation at origin (source wrist = 0 after centering)
         if self.config.floating_base and self.nq > 20:
-            # Tighten wrist translation limits to lock them near zero
             self.q_lb[:3] = 0.0
             self.q_ub[:3] = 0.0
 
-        # Use more iterations for first frame to converge finger poses
+        # More iterations for first frame convergence
         saved_n_iter = self.config.n_iter_first
         self.config.n_iter_first = 200
 
+        # --- Frame alignment setup ---
+        # OPERATOR2MANO: fixed rotation from MediaPipe wrist convention → robot palm convention
+        if self.config.hand_side == "left":
+            from wuji_retargeting.mediapipe import OPERATOR2MANO_LEFT as OP2MANO
+        else:
+            from wuji_retargeting.mediapipe import OPERATOR2MANO_RIGHT as OP2MANO
+        R_mano = np.array(OP2MANO, dtype=np.float64)
+
+        # Primary: wrist_q from data (direct 6D pose measurement)
+        wrist_q_seq = clip.get("wrist_q")  # (T, 4) xyzw quaternion, or None
+        use_wrist_q = wrist_q_seq is not None
+
+        # Fallback: SVD estimation (only when no wrist_q)
+        if not use_wrist_q:
+            from .mediapipe_io import preprocess_landmarks
+
         for t in tqdm(range(T), desc="Retargeting (obj mode)"):
-            # Preprocess hand landmarks (center to wrist + SVD + MANO + scale)
-            lm = preprocess_landmarks(
-                landmarks_raw[t],
-                self.config.mediapipe_rotation,
-                hand_side=self.config.hand_side,
-                global_scale=self.global_scale,
-                use_mano_rotation=self.config.use_mano_rotation,
-            )
-
-            # Object points: mesh local → world → wrist-relative
             wrist_world = landmarks_raw[t, 0]
+            lm_centered = landmarks_raw[t] - wrist_world
+
+            if use_wrist_q:
+                # wrist_q derotates world→local, OPERATOR2MANO fixes convention
+                R_wrist = RotLib.from_quat(wrist_q_seq[t]).as_matrix()
+                R_align = R_wrist.T @ R_mano
+                lm = lm_centered @ R_align
+            else:
+                # SVD estimates orientation from landmarks, OPERATOR2MANO fixes convention
+                lm = preprocess_landmarks(
+                    landmarks_raw[t],
+                    self.config.mediapipe_rotation,
+                    hand_side=self.config.hand_side,
+                    global_scale=self.global_scale,
+                    use_mano_rotation=self.config.use_mano_rotation,
+                )
+
+            # Object points: local → world → wrist-relative → same rotation as hand
             obj_world = transform_object_points(obj_pts_local, obj_q[t], obj_t[t])
-            obj_wrist_relative = obj_world - wrist_world
+            obj_transformed = (obj_world - wrist_world) @ R_align if use_wrist_q else obj_world - wrist_world
 
-            if self.config.use_mano_rotation:
-                # Apply same SVD+MANO rotation as hand preprocessing
+            if not use_wrist_q and self.config.use_mano_rotation:
+                # SVD fallback: apply same rotation to object points
                 from wuji_retargeting.mediapipe import apply_mediapipe_transformations
-                raw_centered = landmarks_raw[t] - wrist_world
-                transformed = apply_mediapipe_transformations(landmarks_raw[t].copy(), self.config.hand_side)
-                R_transform, _, _, _ = np.linalg.lstsq(raw_centered[1:6], transformed[1:6], rcond=None)
-                obj_transformed = obj_wrist_relative @ R_transform
-
-                from scipy.spatial.transform import Rotation
+                raw_c = landmarks_raw[t] - wrist_world
+                trans = apply_mediapipe_transformations(landmarks_raw[t].copy(), self.config.hand_side)
+                R_t, _, _, _ = np.linalg.lstsq(raw_c[1:6], trans[1:6], rcond=None)
+                obj_transformed = (obj_world - wrist_world) @ R_t
                 angles = [self.config.mediapipe_rotation.get(k, 0) for k in "xyz"]
                 if any(a != 0 for a in angles):
-                    R_extra = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
+                    R_extra = RotLib.from_euler("xyz", angles, degrees=True).as_matrix()
                     obj_transformed = obj_transformed @ R_extra.T
-            else:
-                # No rotation — object stays in world-centered frame
-                obj_transformed = obj_wrist_relative
 
             if self.global_scale != 1.0:
+                lm *= self.global_scale
                 obj_transformed *= self.global_scale
 
             q_opt = self.retarget_frame(

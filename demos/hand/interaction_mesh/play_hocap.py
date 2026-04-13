@@ -86,8 +86,7 @@ def detect_handedness(npz_path, meta_path):
 
 def retarget_hand(clip, hand_side, scene_xml, obj_samples, semantic_weight):
     """Retarget one hand and return qpos + viz data."""
-    from wuji_retargeting.mediapipe import apply_mediapipe_transformations
-    from scipy.spatial.transform import Rotation
+    from scipy.spatial.transform import Rotation as RotLib
 
     config = HandRetargetConfig(
         mjcf_path=str(scene_xml), hand_side=hand_side,
@@ -96,28 +95,28 @@ def retarget_hand(clip, hand_side, scene_xml, obj_samples, semantic_weight):
     retargeter = InteractionMeshHandRetargeter(config)
     qpos = retargeter.retarget_hocap_sequence(clip, use_semantic_weights=semantic_weight)
 
-    # Precompute per-frame inverse transforms for world-frame visualization
-    # retarget works in SVD+MANO rotated wrist-relative frame
-    # viz needs world frame: world_pos = R_full_inv @ local_pos + wrist_world
+    # Per-frame wrist transform for world-frame visualization
+    # R_align = R_wrist.T @ OPERATOR2MANO maps world-centered → robot-local
+    # R_align_inv = R_align.T maps robot-local → world-centered
+    if hand_side == "left":
+        from wuji_retargeting.mediapipe import OPERATOR2MANO_LEFT as OP2MANO
+    else:
+        from wuji_retargeting.mediapipe import OPERATOR2MANO_RIGHT as OP2MANO
+    R_mano = np.array(OP2MANO, dtype=np.float64)
+
     T = len(clip["landmarks"])
-    R_inv_list = []    # per-frame inverse rotation
-    wrist_list = []    # per-frame wrist world position
+    R_inv_list = []
+    wrist_list = []
+    wrist_q_seq = clip.get("wrist_q")
 
     for t in range(T):
-        lm_raw = clip["landmarks"][t]
-        wrist = lm_raw[0]
-        raw_centered = lm_raw - wrist
-        transformed = apply_mediapipe_transformations(lm_raw.copy(), hand_side)
-        R_t, _, _, _ = np.linalg.lstsq(raw_centered[1:6], transformed[1:6], rcond=None)
-
-        angles = [config.mediapipe_rotation.get(k, 0) for k in "xyz"]
-        R_extra = Rotation.from_euler("xyz", angles, degrees=True).as_matrix() if any(a != 0 for a in angles) else np.eye(3)
-        R_full = R_t @ R_extra.T
-
-        # R_full transforms: world_centered → preprocessed
-        # R_full_inv transforms: preprocessed → world_centered
-        R_inv_list.append(np.linalg.inv(R_full))
-        wrist_list.append(wrist.copy())
+        wrist_list.append(clip["landmarks"][t, 0].copy())
+        if wrist_q_seq is not None:
+            R_wrist = RotLib.from_quat(wrist_q_seq[t]).as_matrix()
+            R_align = R_wrist.T @ R_mano
+            R_inv_list.append(R_align.T)  # R_align is orthogonal, inv = transpose
+        else:
+            R_inv_list.append(np.eye(3))
 
     return {
         "qpos": qpos,
@@ -194,7 +193,21 @@ def main():
         _inject_fingertip_sites(spec, hand_side)
         _inject_wrist6dof_mode(spec)
 
-    # Inject object mesh
+    # Enable hand↔object collision before compile
+    def _enable_hand_collision(body):
+        for geom in body.geoms:
+            geom.contype = 1
+            geom.conaffinity = 2
+        for child in body.bodies:
+            _enable_hand_collision(child)
+
+    if bimanual:
+        _enable_hand_collision(spec.body("wuji_rh_wrist"))
+        _enable_hand_collision(spec.body("wuji_lh_wrist"))
+    else:
+        _enable_hand_collision(spec.body("wuji_wrist"))
+
+    # Inject object mesh (collision: contype=2 ↔ hand conaffinity=2)
     obj_body = spec.worldbody.add_body()
     obj_body.name = "hocap_object"
     obj_body.mocap = True
@@ -207,13 +220,13 @@ def main():
     obj_geom.meshname = "hocap_obj_mesh"
     obj_geom.rgba = [0.6, 0.4, 0.2, 0.5]
     obj_geom.group = 0
-    obj_geom.contype = 0
-    obj_geom.conaffinity = 0
+    obj_geom.contype = 2
+    obj_geom.conaffinity = 1
 
     model = spec.compile()
     data = mujoco.MjData(model)
 
-    # Semi-transparent hands (both single and bimanual)
+    # Semi-transparent hands
     for i in range(model.ngeom):
         geom_name = model.geom(i).name
         is_obj = "hocap" in geom_name
@@ -221,18 +234,39 @@ def main():
         if not is_obj and not is_ground:
             model.geom_rgba[i, 3] = 0.25
 
-    model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
-    model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
-
-    # Map qpos indices for each hand in the combined model
-    # Bimanual: [0:26] = right, [26:52] = left
-    # Single: [0:26] = that hand
+    # Map qpos/ctrl indices per hand
     qpos_slices = {}
+    ctrl_finger_slices = {}
+    ctrl_wrist_slices = {}
     if bimanual:
         qpos_slices["right"] = slice(0, 26)
         qpos_slices["left"] = slice(26, 52)
+        ctrl_finger_slices["right"] = slice(0, 20)
+        ctrl_finger_slices["left"] = slice(20, 40)
+        ctrl_wrist_slices["right"] = slice(40, 46)
+        ctrl_wrist_slices["left"] = slice(46, 52)
     else:
         qpos_slices[hands[0]] = slice(0, 26)
+        ctrl_finger_slices[hands[0]] = slice(0, 20)
+        ctrl_wrist_slices[hands[0]] = slice(20, 26)
+
+    # Physics setup
+    n_substeps = max(1, int(np.ceil(avg_dt / model.opt.timestep)))
+    model.opt.gravity[:] = 0
+
+    # Initialize qpos to first frame
+    from scipy.spatial.transform import Rotation as RotLib
+    for hand_side in hands:
+        hd = hand_data[hand_side]
+        q = hd["qpos"][0].copy()
+        R_inv = hd["R_inv_list"][0]
+        wrist_w = hd["wrist_list"][0]
+        q[:3] = q[:3] @ R_inv + wrist_w
+        R_hinge = RotLib.from_euler('XYZ', q[3:6]).as_matrix()
+        q[3:6] = RotLib.from_matrix(R_inv.T @ R_hinge).as_euler('XYZ')
+        data.qpos[qpos_slices[hand_side]] = q
+        data.ctrl[ctrl_finger_slices[hand_side]] = q[6:26]
+        data.ctrl[ctrl_wrist_slices[hand_side]] = q[0:6]
 
     mujoco.mj_forward(model, data)
 
@@ -277,6 +311,8 @@ def main():
     viewer.cam.elevation = -25
     viewer.cam.distance = 0.8 if bimanual else 0.6
     viewer.cam.lookat[:] = [0, 0, 0.15]
+    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
+    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = True
 
     mode_str = "bimanual" if bimanual else f"single ({hands[0]})"
     print(f"\nPlaying: {mode_str}, {total_frames} frames, {fps} fps")
@@ -321,31 +357,34 @@ def main():
 
             idx = max(0, min(idx, total_frames - 1))
 
-            # Set qpos — transform wrist to world frame so hand mesh aligns with overlay
+            # Physics mode: set ctrl targets, step physics for collision response
             from scipy.spatial.transform import Rotation as RotLib
+            data.qvel[:] = 0  # reset velocity each frame
+
             for hand_side in hands:
                 hd = hand_data[hand_side]
                 q = hd["qpos"][idx].copy()
                 R_inv = hd["R_inv_list"][idx]
                 wrist_w = hd["wrist_list"][idx]
 
-                # Wrist translation: local→world
+                # Transform retarget qpos (robot-local) to world frame
                 q[:3] = q[:3] @ R_inv + wrist_w
-                # Wrist rotation: keep in preprocessed frame
-                # (finger joints are relative to wrist — changing wrist rotation
-                #  would misalign fingers. Mesh shows correct finger shape
-                #  but wrist orientation is in preprocessed frame, not world.)
+                R_hinge = RotLib.from_euler('XYZ', q[3:6]).as_matrix()
+                q[3:6] = RotLib.from_matrix(R_inv.T @ R_hinge).as_euler('XYZ')
 
+                data.ctrl[ctrl_finger_slices[hand_side]] = q[6:26]
+                data.ctrl[ctrl_wrist_slices[hand_side]] = q[0:6]
                 data.qpos[qpos_slices[hand_side]] = q
 
             # Object mocap in world frame
             hd0 = hand_data[hands[0]]
             clip0 = hd0["clip"]
-            obj_center_world = clip0["object_t"][idx]
-            data.mocap_pos[0] = obj_center_world
+            data.mocap_pos[0] = clip0["object_t"][idx]
             obj_q = clip0["object_q"][idx]
             data.mocap_quat[0] = [obj_q[3], obj_q[0], obj_q[1], obj_q[2]]
-            mujoco.mj_forward(model, data)
+
+            for _ in range(n_substeps):
+                mujoco.mj_step(model, data)
 
             # Draw overlay — transform everything to world frame for visualization
             any_vis = vis["source"] or vis["robot"] or vis["mesh"]
@@ -356,12 +395,10 @@ def main():
                     for hand_side in hands:
                         hd = hand_data[hand_side]
                         ret = hd["retargeter"]
-                        R_inv = hd["R_inv_list"][idx]
-                        wrist_w = hd["wrist_list"][idx]
 
-                        # Source: preprocessed (wrist-relative rotated) → world
+                        # Source: direct world coords from data
                         lm_raw = hd["clip"]["landmarks"][idx]
-                        source_world = lm_raw[ret.mp_indices]  # direct world coords from data
+                        source_world = lm_raw[ret.mp_indices]
 
                         # Object points in world frame
                         obj_world = transform_object_points(
@@ -370,10 +407,14 @@ def main():
                             hd["clip"]["object_t"][idx],
                         )
 
-                        # Robot FK: retarget qpos → FK in wrist-relative → inverse rotate → world
-                        ret.hand.forward(hd["qpos"][idx])
-                        robot_local = ret._get_robot_keypoints()  # wrist-relative, rotated
-                        robot_world = (robot_local @ R_inv) + wrist_w  # back to world
+                        # Robot: physics-resolved positions (world frame)
+                        bp = ("lh_" if hand_side == "left" else "rh_") if bimanual else ""
+                        def _get_pos(name):
+                            if "tip_link" in name:
+                                finger = name.split("_finger")[1].split("_")[0]
+                                return data.site(f"{bp}finger{finger}_tip").xpos.copy()
+                            return data.body(f"{bp}{name}").xpos.copy()
+                        robot_world = np.array([_get_pos(n) for n in ret.body_names])
 
                         if vis["source"]:
                             for pt in source_world:
