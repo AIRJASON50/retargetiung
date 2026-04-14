@@ -299,3 +299,174 @@ robot_only (21 点, 20 DOF):
 **核心结论**: interaction mesh 的价值不在于 Delaunay 或 Laplacian 的数学形式,
 而在于**通过物体采样密度隐式编码优先级, 用固定锚点打破纯对齐退化**。
 robot_only 只是管线验证, 加入物体后才是真正的测试。
+
+---
+
+## 6. OmniRetarget 移植完成度审计
+
+### 6.1 已移植功能
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| Interaction mesh (Delaunay) | done | `mesh_utils.py` |
+| Laplacian deformation + SQP (CVXPY+Clarabel) | done | `retargeter.py` |
+| Trust region (SOC on dq) | done | |
+| Joint limits (box constraints) | done | |
+| Temporal smoothness | done | `smooth_weight=0.2` |
+| Object anchor points (J=0) | done | |
+| Fixed topology (reuse Delaunay) | done | EXP-1 验证 |
+| Semantic weights (pinch-aware) | done | 自有扩展, 非 OmniRetarget 原版 |
+| Non-penetration (soft penalty) | done | `activate_non_penetration`, 受数据穿透限制 |
+
+### 6.2 未移植 (不适用于灵巧手)
+
+| 功能 | 原因 |
+|------|------|
+| Foot sticking constraint | 手部无脚 |
+| Velocity limits (公式 3d) | OmniRetarget 代码中也未实现 (论文有, 代码无) |
+| Q_diag joint regularization | 手部 Laplacian 过约束, 不需要额外正则 |
+| Nominal trajectory tracking | 仅用于 climbing augmentation |
+| Ground grid points (225 points) | locomotion 专用 |
+
+### 6.3 接触机制分析
+
+OmniRetarget 的接触保持不是显式设计的, 而是 Laplacian 拓扑的副产品:
+
+```
+源数据中手指贴物体 → Delaunay 中手指-物体成为邻居
+→ Laplacian 编码 "手指-物体距离 ≈ 0"
+→ 优化器让 robot 手指也贴物体
+→ Non-penetration 约束卡住 "不穿过"
+→ 结果: 贴合但不穿透
+```
+
+验证 (clip hocap\_subject\_1\_165807\_seg03, frame 109):
+- 接触帧: Laplacian norm = 0.008-0.020, 有 9-22 个 object 邻居
+- 远离帧: Laplacian norm = 0.12-0.28, 邻居距离 344-560mm
+- 确认: 接触信息通过 Laplacian 范数大小隐式编码
+
+**没有** force closure, grasp wrench space, 摩擦锥, 接触力优化等显式接触设计。
+论文测 "contact preservation" 时, 测的是 keypoint 距离, 不是接触力或抓取稳定性。
+
+---
+
+## 7. 坐标对齐管线: SVD + OPERATOR2MANO
+
+### 7.1 SVD 帧估计
+
+从 3 个 MediaPipe landmark 估计手掌坐标系:
+
+```
+输入: landmark[0]=WRIST, landmark[5]=INDEX_MCP, landmark[9]=MIDDLE_MCP
+步骤:
+  1. 减去腕部 → 2 个以腕部为原点的向量
+  2. SVD 分解 → 手掌平面 3 个正交轴
+     - x: wrist→middle_MCP 方向 (面内主方向, 投影到平面)
+     - normal: 手掌法向量 (SVD 最小奇异值对应的方向)
+     - z: cross(x, normal) (面内次方向)
+  3. 符号校正: 确保 z 方向和 index→middle 一致
+输出: 3x3 旋转矩阵 R_svd
+```
+
+选用 [0,5,9] 的原因: 这 3 个 MCP 在抓握时最稳定 (ring/pinky 随握拳大幅移动, thumb CMC 结构特殊)。
+
+消融测试 (40 clips):
+
+| 关键点组合 | 首帧误差 | 前10帧均值 |
+|-----------|---------|----------|
+| [0,5,9] 食指+中指 (原版) | 30.8mm | 24.0mm |
+| [0,5,13] 食指+无名指 | 33.2mm | 25.7mm |
+| [0,5,17] 食指+小指 | 37.8mm | 29.4mm |
+| [0,1,9] 拇指+中指 | 29.7mm | 23.7mm |
+
+越远离手掌中轴效果越差; 原版选择接近最优。
+
+### 7.2 OPERATOR2MANO
+
+固定旋转矩阵, 将 SVD 坐标系约定转换到 WujiHand palm_link 约定:
+
+```
+SVD frame:           WujiHand palm_link (q=0):
+  x = wrist→middle    手指方向 → +Z
+  normal = 法向量      手掌法向 → -Y
+  z = cross(x,normal)  侧向 → +X
+
+OPERATOR2MANO_LEFT = [[ 0  0 -1]    SVD_x     → -Z
+                      [ 1  0  0]    SVD_norm  →  X
+                      [ 0 -1  0]]   SVD_z     → -Y
+
+OPERATOR2MANO_RIGHT = [[ 0  0 -1]
+                       [-1  0  0]   (Y 轴镜像)
+                       [ 0  1  0]]
+```
+
+和数据无关, 和帧无关。只要 SVD 代码和 WujiHand URDF 不变, 此矩阵不变。
+
+### 7.3 SVD 的自洽性
+
+SVD 对齐的核心优势: **内部自洽**。
+- SVD 从 landmark 几何拟合朝向 → 用这个朝向旋转同一组 landmark
+- 不管 SVD 估计偏了几度, 旋转后的 landmark 和 robot rest frame 的对齐是一致的
+- 优化器看到的 source 和 robot 在同一个坐标系里, 偏差被抵消
+
+wrist_q 的问题: **外部不自洽**。
+- wrist_q 来自 HO-Cap 姿态估计管线, 和 MediaPipe landmark 不是同一个系统
+- 即使 wrist_q 的 "真实朝向" 更准, 它和 landmark 坐标不一致
+- 优化器看到的 source (按 wrist_q 旋转) 和 robot 在不同的隐式坐标系里
+
+---
+
+## 8. HO-Cap 数据集质量分析
+
+### 8.1 数据穿透分析 (264 clips)
+
+**测试方法**: 在每个 MediaPipe 指尖 landmark 位置放 1mm 探测球,
+用 MuJoCo `mj_geomDistance` 测到物体凸包的符号距离。无算法介入, 纯测标注质量。
+
+| 指标 | 均值 | 中位数 | 范围 |
+|------|------|--------|------|
+| 指尖穿透率 (帧占比) | 37% | 39% | 0-91% |
+| 最大穿透深度 | 16mm | 17mm | 0-38mm |
+| 最长连续穿透 | 100帧 | 94帧 | 0-448帧 |
+
+穿透率分布:
+- 0-10% (clean): 63 clips (24%)
+- 10-30%: 44 clips (17%)
+- 30-50%: 65 clips (25%)
+- 50-70%: 55 clips (21%)
+- 70-100% (severe): 37 clips (14%)
+
+Per-finger: thumb/index 最严重 (~20%), pinky 最轻 (9%)。
+与手-物遮挡程度一致 — MediaPipe 在遮挡下估计偏差。
+
+**结论**: 穿透是 MediaPipe 3D 估计在手-物遮挡场景下的系统性偏差, 非偶发噪声。
+非穿透约束在此数据质量下无法有效工作 (Laplacian 目标要求穿透位置, 约束禁止穿透, 两者冲突)。
+
+### 8.2 SVD vs wrist_q 对齐对比 (264 clips)
+
+**测试方法**: 对全量 264 个 hand-clip 分别用 SVD+MANO 和 wrist_q+MANO 对齐,
+retarget 前 10 帧, 比较指尖位置误差。
+
+| | ALL (264) | LEFT (84) | RIGHT (180) |
+|---|---|---|---|
+| SVD f0 | 30.1mm | 31.5mm | 29.4mm |
+| WQ f0 | 54.4mm | 38.7mm | 61.8mm |
+| Delta | +24.4mm | +7.2mm | +32.4mm |
+| SVD 胜率 | 92% (242/264) | 74% (62/84) | 100% (180/180) |
+
+Per-subject: wrist_q 右手偏差跨所有 9 个被试一致 (系统性, 非个别被试问题)。
+SVD-wrist_q 朝向差: 均值 20°, 最大 91° (近正交)。
+
+**结论**: HO-Cap 的 wrist_q 对右手系统性不准确。
+SVD 应作为 retarget 对齐主路径, wrist_q 仅用于可视化世界坐标变换。
+
+### 8.3 综合结论
+
+retarget 效果受限的根因在数据集:
+1. **MediaPipe 穿透**: 37% 帧指尖在物体内 (17mm 深), 使非穿透约束与 Laplacian 冲突
+2. **wrist_q 右手偏差**: 腕部姿态与 landmark 几何平均差 20°, 导致初始帧对齐差
+
+算法本身 (interaction mesh + Laplacian + SQP) 在 SVD 对齐下 tip error 10-15mm,
+与 OmniRetarget 论文精度一致。瓶颈在输入数据质量。
+
+可视化报告: `experiments/reports/report1_penetration.png`, `report2_alignment.png`, `report3_svd_landmarks.png`

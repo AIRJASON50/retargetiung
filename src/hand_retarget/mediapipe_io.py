@@ -5,6 +5,7 @@ Handles .pkl files in the same format as wuji_retargeting baseline.
 Uses the baseline's apply_mediapipe_transformations to ensure identical
 coordinate frame alignment (SVD frame estimation + OPERATOR2MANO rotation).
 """
+from __future__ import annotations
 
 import pickle
 from pathlib import Path

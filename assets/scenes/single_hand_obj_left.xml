@@ -7,7 +7,7 @@
          [6 wrist (tx,ty,tz,rx,ry,rz) + 20 finger] = 26 -->
 
   <compiler angle="radian" autolimits="true"/>
-  <option timestep="0.01" integrator="Euler" iterations="5" ls_iterations="8">
+  <option timestep="0.005" integrator="Euler" iterations="30" ls_iterations="20">
     <flag eulerdamp="disable"/>
   </option>
 

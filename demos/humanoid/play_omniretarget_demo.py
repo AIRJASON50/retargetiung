@@ -25,7 +25,6 @@ Usage:
 
 import argparse
 import sys
-import time
 from pathlib import Path
 
 import mujoco
@@ -34,11 +33,16 @@ import numpy as np
 import torch
 import trimesh
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-
-from hand_retarget.mesh_utils import create_interaction_mesh, get_adjacency_list
-
+# Add src and project root to path
 PROJECT_DIR = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_DIR / "src"))
+sys.path.insert(0, str(PROJECT_DIR))
+
+from hand_retarget.mesh_utils import create_interaction_mesh, get_adjacency_list  # noqa: E402
+
+from demos.shared.overlay import add_line, add_sphere, set_geom_alpha  # noqa: E402
+from demos.shared.playback import PlaybackController  # noqa: E402
+
 OMNI_BASE = PROJECT_DIR / "lib" / "25_OmniRetarget" / "code" / "src"
 RETARGET_DIR = OMNI_BASE / "holosoma_retargeting" / "holosoma_retargeting"
 MOTION_DIR = OMNI_BASE / "holosoma" / "holosoma" / "data" / "motions" / "g1_29dof" / "whole_body_tracking"
@@ -139,36 +143,11 @@ COL_SKELETON = np.array([0.3, 0.9, 0.3, 0.25], dtype=np.float32)
 COL_MATCH_LINE = np.array([1.0, 1.0, 0.0, 0.3], dtype=np.float32)
 COL_OBJ_PTS = np.array([0.3, 0.3, 1.0, 0.8], dtype=np.float32)       # blue (object surface)
 COL_GROUND_PTS = np.array([0.6, 0.6, 0.6, 0.5], dtype=np.float32)   # gray (ground grid)
-COL_EDGE_ADDED = np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float32)   # green (new edge)
-COL_EDGE_REMOVED = np.array([1.0, 0.0, 0.0, 1.0], dtype=np.float32) # red (removed edge)
 
 SPHERE_BIG = 0.030
 SPHERE_MED = 0.024
 SPHERE_SMALL = 0.012
 SPHERE_OBJ = 0.008
-
-
-def _add_sphere(scene, pos, rgba, size):
-    if scene.ngeom >= scene.maxgeom:
-        return
-    g = scene.geoms[scene.ngeom]
-    mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_SPHERE,
-                         np.array([size, 0, 0], dtype=np.float64),
-                         pos.astype(np.float64),
-                         np.eye(3, dtype=np.float64).flatten(), rgba)
-    scene.ngeom += 1
-
-
-def _add_line(scene, p1, p2, rgba, width=1.5):
-    if scene.ngeom >= scene.maxgeom:
-        return
-    g = scene.geoms[scene.ngeom]
-    mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_LINE,
-                         np.zeros(3, dtype=np.float64), np.zeros(3, dtype=np.float64),
-                         np.eye(3, dtype=np.float64).flatten(), rgba)
-    mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_LINE, width,
-                          p1.astype(np.float64), p2.astype(np.float64))
-    scene.ngeom += 1
 
 
 def weighted_surface_sampling(mesh_path, n_samples=100, seed=0,
@@ -227,13 +206,6 @@ def create_ground_points(x_range, y_range, grid_size=8):
     return np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
 
 
-def sample_mesh_surface(mesh_path, n_samples=50, seed=42):
-    """Simple uniform surface sampling (legacy, used as fallback)."""
-    mesh = trimesh.load(str(mesh_path))
-    pts, _ = trimesh.sample.sample_surface(mesh, n_samples, seed=seed)
-    return pts
-
-
 def transform_points(pts, quat_wxyz, trans):
     """Transform points by quaternion (wxyz) + translation."""
     from scipy.spatial.transform import Rotation as R
@@ -286,7 +258,7 @@ def main():
         human_joints_all = human_joints_all * scale
         T_human = len(human_joints_all)
     elif cfg.get("use_robot_body_pos"):
-        # No SMPLH data — use retarget body_pos_w to extract robot keypoints for mesh
+        # No SMPLH data -- use retarget body_pos_w to extract robot keypoints for mesh
         robot_body_pos_all = retarget_data["body_pos_w"]  # (T, nbody, 3)
         T_human = T_robot
 
@@ -340,7 +312,8 @@ def main():
     # For slope mode: inject terrain mesh into the G1 XML
     if cfg["object_mesh"] is not None and scene_xml is None:
         terrain_obj_path = str(cfg["object_mesh"].resolve())
-        import tempfile, xml.etree.ElementTree as ET
+        import tempfile
+        import xml.etree.ElementTree as ET
         tree = ET.parse(model_path)
         root = tree.getroot()
         # Add mesh asset
@@ -368,45 +341,24 @@ def main():
     robot_body_ids = [model.body(n).id for n in robot_body_names]
 
     # Semi-transparent robot, keep box/ground opaque
-    for i in range(model.ngeom):
-        geom_name = model.geom(i).name
-        geom_type = model.geom_type[i]
-        is_object = "largebox" in geom_name or "box" in geom_name
-        is_ground = geom_type == mujoco.mjtGeom.mjGEOM_PLANE
-        if not is_object and not is_ground:
-            model.geom_rgba[i, 3] = 0.25
+    set_geom_alpha(model, alpha=0.25, skip_names=["largebox", "box"])
 
     # Set initial robot qpos (first 36 dims), box qpos handled per-frame
     data.qpos[:36] = qpos_seq[0]
     mujoco.mj_forward(model, data)
 
-    # --- Playback state ---
+    # --- Playback ---
     total_display = min(T_human, T_robot)
-    KEY_SPACE, KEY_LEFT, KEY_RIGHT = 32, 263, 262
-    state = {"paused": False, "direction": 1, "step_request": 0, "frame_idx": 0, "resume_flag": False}
+    avg_dt = 1.0 / retarget_fps
 
-    def key_callback(keycode):
-        if keycode == KEY_SPACE:
-            was_paused = state["paused"]
-            state["paused"] = not was_paused
-            if was_paused:
-                state["resume_flag"] = True
-            s = "PAUSED" if state["paused"] else "PLAYING"
-            print(f"  [{s}] frame {state['frame_idx']}/{total_display}")
-        elif keycode == KEY_LEFT:
-            if state["paused"]:
-                state["step_request"] = -1
-            else:
-                state["direction"] = -1
-                print("  [REVERSE <<<]")
-        elif keycode == KEY_RIGHT:
-            if state["paused"]:
-                state["step_request"] = 1
-            else:
-                state["direction"] = 1
-                print("  [FORWARD >>>]")
+    playback = PlaybackController(
+        total_frames=total_display,
+        avg_dt=avg_dt,
+        speed=args.speed,
+        loop=loop,
+    )
 
-    viewer = mujoco.viewer.launch_passive(model, data, key_callback=key_callback)
+    viewer = mujoco.viewer.launch_passive(model, data, key_callback=playback.key_callback)
     viewer.cam.azimuth = 135
     viewer.cam.elevation = -20
     viewer.cam.distance = 3.0
@@ -424,46 +376,11 @@ def main():
     print(f"  Keys: SPACE=pause  LEFT/RIGHT=step/direction")
     print("=" * 60)
 
-    avg_dt = 1.0 / retarget_fps
-    last_frame_time = time.time()
     frame_count = 0
-    prev_edges = frozenset()  # track previous frame's edges for diff
 
     try:
         while viewer.is_running():
-            now = time.time()
-            idx = state["frame_idx"]
-            need_update = False
-
-            if state["paused"]:
-                step = state["step_request"]
-                if step != 0:
-                    idx = max(0, min(idx + step, total_display - 1))
-                    state["step_request"] = 0
-                    state["frame_idx"] = idx
-                    need_update = True
-                else:
-                    time.sleep(0.01)
-            else:
-                if state["resume_flag"]:
-                    last_frame_time = now
-                    state["resume_flag"] = False
-                dt = now - last_frame_time
-                adv = int(dt / (avg_dt / args.speed))
-                if adv >= 1:
-                    idx += state["direction"] * adv
-                    last_frame_time = now
-                    if idx >= total_display:
-                        idx = idx % total_display if loop else total_display - 1
-                        if not loop: state["paused"] = True
-                    elif idx < 0:
-                        idx = total_display + (idx % total_display) if loop else 0
-                        if not loop: state["paused"] = True
-                    state["frame_idx"] = idx
-                    need_update = True
-                else:
-                    time.sleep(0.001)
-
+            idx, need_update = playback.advance()
             if not need_update:
                 viewer.sync()
                 continue
@@ -489,7 +406,6 @@ def main():
                 mapped_human_pts = human_pts[mapped_indices]
             elif robot_body_pos_all is not None:
                 # Use robot body positions from retarget result as mesh source
-                bp = robot_body_pos_all[r_idx]  # (nbody, 3)
                 mapped_human_pts = robot_kp_pts.copy()  # use FK positions as "source"
 
             # Object surface points in world frame
@@ -514,19 +430,9 @@ def main():
                 _, simplices = create_interaction_mesh(all_mesh_pts)
                 adj = get_adjacency_list(simplices, len(all_mesh_pts))
                 current_edges = frozenset((min(i, j), max(i, j)) for i, nb in enumerate(adj) for j in nb)
-                n_human = len(mapped_human_pts)
             else:
                 all_mesh_pts = None
                 current_edges = frozenset()
-                n_human = 0
-
-            # Compute edge diff from previous frame
-            edges_added = current_edges - prev_edges
-            edges_removed = prev_edges - current_edges
-            edges_stable = current_edges & prev_edges
-
-            # Store previous frame's points for drawing removed edges
-            # (removed edges need the OLD positions to draw the red flash)
 
             # --- Draw ---
             with viewer.lock():
@@ -536,37 +442,37 @@ def main():
                     # Skeleton chains
                     for chain in skel_idx_chains:
                         for k in range(len(chain) - 1):
-                            _add_line(viewer.user_scn, human_pts[chain[k]], human_pts[chain[k + 1]],
-                                      COL_SKELETON, 1.0)
+                            add_line(viewer.user_scn, human_pts[chain[k]], human_pts[chain[k + 1]],
+                                     COL_SKELETON, 1.0)
                     # All 52 joints
                     for pt in human_pts:
-                        _add_sphere(viewer.user_scn, pt, COL_HUMAN_ALL, SPHERE_SMALL)
+                        add_sphere(viewer.user_scn, pt, COL_HUMAN_ALL, SPHERE_SMALL)
                     # 15 mapped
                     for pt in mapped_human_pts:
-                        _add_sphere(viewer.user_scn, pt, COL_HUMAN_MAPPED, SPHERE_MED)
+                        add_sphere(viewer.user_scn, pt, COL_HUMAN_MAPPED, SPHERE_MED)
                     # Match lines
                     for hp, rp in zip(mapped_human_pts, robot_kp_pts):
-                        _add_line(viewer.user_scn, hp, rp, COL_MATCH_LINE, 0.5)
+                        add_line(viewer.user_scn, hp, rp, COL_MATCH_LINE, 0.5)
 
                 # Robot keypoints
                 for pt in robot_kp_pts:
-                    _add_sphere(viewer.user_scn, pt, COL_ROBOT_KP, SPHERE_MED)
+                    add_sphere(viewer.user_scn, pt, COL_ROBOT_KP, SPHERE_MED)
 
                 # Object surface points (blue)
                 if obj_pts_world is not None:
                     for pt in obj_pts_world:
-                        _add_sphere(viewer.user_scn, pt, COL_OBJ_PTS, SPHERE_OBJ)
+                        add_sphere(viewer.user_scn, pt, COL_OBJ_PTS, SPHERE_OBJ)
 
                 # Ground grid points (gray)
                 if ground_pts is not None:
                     for pt in ground_pts:
-                        _add_sphere(viewer.user_scn, pt, COL_GROUND_PTS, SPHERE_OBJ * 0.6)
+                        add_sphere(viewer.user_scn, pt, COL_GROUND_PTS, SPHERE_OBJ * 0.6)
 
                 # Mesh edges
                 if show_mesh and all_mesh_pts is not None:
                     for i, j in current_edges:
-                        _add_line(viewer.user_scn, all_mesh_pts[i], all_mesh_pts[j],
-                                  COL_MESH_EDGE, 1.5)
+                        add_line(viewer.user_scn, all_mesh_pts[i], all_mesh_pts[j],
+                                 COL_MESH_EDGE, 1.5)
 
             viewer.sync()
             frame_count += 1
@@ -574,7 +480,7 @@ def main():
             if frame_count % 200 == 0:
                 n_e = len(current_edges)
                 n_pts = len(all_mesh_pts) if all_mesh_pts is not None else 0
-                print(f"Frame {idx}/{total_display}, mesh: {n_pts} pts, {n_e} edges, +{len(edges_added)} -{len(edges_removed)}")
+                print(f"Frame {idx}/{total_display}, mesh: {n_pts} pts, {n_e} edges")
 
     except KeyboardInterrupt:
         print("\nStopped.")
