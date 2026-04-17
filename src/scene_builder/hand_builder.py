@@ -20,58 +20,250 @@ Multi-hand support:
   legacy unprefixed names for backward compatibility.
 """
 
+from __future__ import annotations
+
+from typing import NotRequired, TypedDict
+
 import mujoco
 import numpy as np
 
-# ---------------------------------------------------------------------------
+# ==============================================================================
 # Constants
-# ---------------------------------------------------------------------------
+# ==============================================================================
 
-# Fingertip site positions (in link4 local frame).
-# From right_mjx.xml / left_mjx.xml tip_link mesh geom positions (rubber fingertip cap).
-# Left/right hands share the same offsets (only thumb Y sign differs, ~0.2mm, negligible).
-_FINGERTIP_SITES = {
+N_FINGER_DOF_PER_HAND: int = 20
+"""Number of finger joints per hand (5 fingers x 4 DOF)."""
+
+N_CUBE_QPOS: int = 7
+"""Cube freejoint qpos dimensions (3 pos + 4 quat)."""
+
+COLLISION_BIT_RH: int = 1
+"""Collision group bit for right hand (bit 0)."""
+
+COLLISION_BIT_FLOOR: int = 2
+"""Collision group bit for floor (bit 1)."""
+
+COLLISION_BIT_LH: int = 4
+"""Collision group bit for left hand (bit 2)."""
+
+_FINGERTIP_SITES: dict[str, list[float]] = {
     "finger1": [-0.00105, -0.0002, 0.0273],
     "finger2": [-0.00105, 0.0002, 0.0267],
     "finger3": [-0.00105, 0.0002, 0.0267],
     "finger4": [-0.00106, 0.0002, 0.0267],
     "finger5": [-0.00104, 0.0002, 0.0267],
 }
+"""Fingertip site positions in link4 local frame (from tip_link mesh geom positions)."""
 
-# Physics mode: wuji_wrist inertial for freejoint body
-_WRIST_INERTIAL = {"mass": 0.05, "pos": [0, 0, 0], "inertia": [0.0001, 0.0001, 0.0001]}
+_WRIST_INERTIAL: dict[str, float | list[float]] = {
+    "mass": 0.05,
+    "pos": [0, 0, 0],
+    "inertia": [0.0001, 0.0001, 0.0001],
+}
+"""Physics mode: wuji_wrist inertial properties for freejoint body."""
 
-# Weld constraint parameters
-_WELD_SOLREF = [0.02, 1.0]
-_WELD_SOLIMP = [0.9, 0.95, 0.001, 0.5, 2]
+_WELD_SOLREF: list[float] = [0.02, 1.0]
+"""Weld equality constraint solver reference parameters [timeconst, dampratio]."""
 
-# 6-DOF wrist virtual joint parameters (IsaacLab-style PD control)
-# Slides first (outermost), then hinges (innermost) -> intrinsic XYZ Euler.
-_WRIST6DOF_SLIDE = {
+_WELD_SOLIMP: list[float] = [0.9, 0.95, 0.001, 0.5, 2]
+"""Weld equality constraint solver impedance parameters."""
+
+_WRIST6DOF_SLIDE: dict[str, float | list[float]] = {
     "range": [-0.5, 0.5],  # m (trajectory motion range)
     "kp": 1600.0,  # N/m (stiff position tracking)
     "kv": 60.0,  # N*s/m (damping)
     "forcerange": [-100, 100],  # N
     "armature": 0.01,
 }
-_WRIST6DOF_HINGE = {
+"""6-DOF wrist slide joint parameters (IsaacLab-style PD control)."""
+
+_WRIST6DOF_HINGE: dict[str, float | list[float]] = {
     "range": [-3.14159, 3.14159],  # rad (full rotation)
     "kp": 15.0,  # N*m/rad (compliant orientation tracking, reduced from 100)
     "kv": 0.5,  # N*m*s/rad (reduced from 4.0, zeta ~0.4 for I~0.015 kg*m^2)
     "forcerange": [-50, 50],  # N*m
     "armature": 0.01,
 }
-_WRIST_SLIDE_NAMES = ["wrist_tx", "wrist_ty", "wrist_tz"]
-_WRIST_HINGE_ORDERS = {
+"""6-DOF wrist hinge joint parameters (IsaacLab-style PD control)."""
+
+_WRIST_SLIDE_NAMES: list[str] = ["wrist_tx", "wrist_ty", "wrist_tz"]
+"""Wrist translation joint names (outermost in joint chain)."""
+
+_WRIST_HINGE_ORDERS: dict[str, tuple[list[str], list[list[int]]]] = {
     "XYZ": (["wrist_rx", "wrist_ry", "wrist_rz"], [[1, 0, 0], [0, 1, 0], [0, 0, 1]]),
     "ZXY": (["wrist_rz", "wrist_rx", "wrist_ry"], [[0, 0, 1], [1, 0, 0], [0, 1, 0]]),
 }
-_WRIST_HINGE_NAMES, _WRIST_AXES = _WRIST_HINGE_ORDERS["XYZ"]  # default
+"""Rotation hinge orderings mapping order name to (joint_names, axes)."""
+
+_WRIST_HINGE_NAMES: list[str]
+"""Default wrist hinge joint names (XYZ order)."""
+
+_WRIST_AXES: list[list[int]]
+"""Default wrist hinge axes corresponding to _WRIST_HINGE_NAMES."""
+
+_WRIST_HINGE_NAMES, _WRIST_AXES = _WRIST_HINGE_ORDERS["XYZ"]
+
+_PALM_FRAME_Z_OFFSET: float = 0.05
+"""Z-offset of palm_frame_body from palm_link origin (meters)."""
 
 
-# ---------------------------------------------------------------------------
-# MjSpec injection helpers
-# ---------------------------------------------------------------------------
+class HandSpec(TypedDict):
+    """Multi-hand configuration for a single hand in a scene.
+
+    Required keys specify the hand identity and naming.
+    ``attach_prefix`` is optional and only needed when the scene XML
+    uses ``<attach prefix="..."/>`` for multiple hand models.
+    """
+
+    side: str
+    """Hand side: ``"left"`` or ``"right"``."""
+
+    wrist_body: str
+    """Name of the wrist body in the MuJoCo model."""
+
+    prefix: str
+    """Name prefix for injected elements (e.g. ``"rh_"`` for bimanual)."""
+
+    attach_prefix: NotRequired[str]
+    """Extra prefix from ``<attach prefix="..."/>``. Prepended to body names for lookups."""
+
+
+# ==============================================================================
+# Public API
+# ==============================================================================
+
+
+def load_scene_model(
+    scene_xml_path: str,
+    hand_side: str = "right",
+    mount_pos: str = "0 0 0",
+    mount_quat: str = "1 0 0 0",
+    physics_mode: bool = False,
+    wrist_mode: str | None = None,
+    assets: dict[str, bytes] | None = None,
+    hands: list[HandSpec] | None = None,
+    hinge_order: str = "XYZ",
+) -> mujoco.MjModel:
+    """Load a scene with MjSpec injection for non-native elements.
+
+    Scene XML uses <model> + <attach> to load hand and cube from disk.
+    MjSpec injects fingertip sites, debug markers, and physics/wrist elements.
+
+    Two usage modes:
+      1. Single-hand (hands=None): Uses hand_side/mount_pos/etc parameters.
+         Element names are unprefixed for backward compatibility.
+      2. Multi-hand (hands=[...]): Each hand dict specifies side, wrist_body,
+         prefix, and attach_prefix. Scene XML must use matching <attach prefix>.
+
+    Args:
+        scene_xml_path: Absolute path to scene.xml
+        hand_side: "right" or "left" (single-hand mode only)
+        mount_pos: wrist body position string (for physics_mode)
+        mount_quat: wrist body quaternion wxyz string (for physics_mode)
+        physics_mode: If True, add mocap + freejoint + weld constraint
+        wrist_mode: "wrist6dof" for 6-DOF virtual joints with PD actuators
+        assets: Unused (kept for API compatibility)
+        hands: List of hand specs for multi-hand mode. Each dict:
+               {"side": "right"|"left", "wrist_body": str, "prefix": str,
+                "attach_prefix": str}
+               "attach_prefix" must match <attach prefix="..."/> in scene XML
+               so body lookups use the correct prefixed names.
+               When provided, hand_side/mount_pos/mount_quat are ignored.
+
+    Returns:
+        Compiled MjModel ready for simulation or mjx.put_model().
+
+    Raises:
+        ValueError: If both physics_mode and wrist_mode are specified.
+    """
+    if physics_mode and wrist_mode:
+        raise ValueError("Cannot use both physics_mode and wrist_mode simultaneously.")
+
+    # Load scene spec from file (all referenced files resolved from disk)
+    spec = mujoco.MjSpec.from_file(scene_xml_path)
+
+    # Save pre-injection keyframe for re-indexing after joint injection
+    pre_qpos, pre_ctrl = None, None
+    for k in spec.keys:
+        if k.name == "home":
+            pre_qpos = np.array(k.qpos, dtype=np.float64)
+            pre_ctrl = np.array(k.ctrl, dtype=np.float64)
+            break
+
+    if wrist_mode is not None and wrist_mode != "wrist6dof":
+        raise ValueError(f"Unsupported wrist_mode: {wrist_mode!r}. Valid: None, 'wrist6dof'.")
+
+    if hands is not None:
+        # --- Multi-hand mode ---
+        for hand in hands:
+            side = hand["side"]
+            wrist_body = hand["wrist_body"]
+            prefix = hand.get("prefix", "")
+            attach_prefix = hand.get("attach_prefix", "")
+
+            _inject_fingertip_sites(spec, side, name_prefix=prefix, body_prefix=attach_prefix)
+            _inject_wrist_frame(spec, side, name_prefix=prefix, body_prefix=attach_prefix)
+
+            if physics_mode:
+                _inject_physics_mode(
+                    spec,
+                    mount_pos=[0, 0, 0],
+                    mount_quat=[1, 0, 0, 0],
+                    wrist_body_name=wrist_body,
+                    name_prefix=prefix,
+                )
+            elif wrist_mode == "wrist6dof":
+                _inject_wrist6dof_mode(spec, wrist_body_name=wrist_body, joint_prefix=prefix, hinge_order=hinge_order)
+
+        # --- Collision groups: prevent left-right hand collision ---
+        # Bit layout: bit 0 (1) = RH, bit 1 (2) = floor, bit 2 (4) = LH
+        # RH vs LH: (1&4)|(4&1) = 0 -> no collision
+        # Both vs Cube: cube contype=5, conaffinity=7 -> collides with all
+        if len(hands) == 2:
+            _set_collision_group(spec, hands[0]["wrist_body"], contype=COLLISION_BIT_RH, conaffinity=COLLISION_BIT_RH)
+            _set_collision_group(spec, hands[1]["wrist_body"], contype=COLLISION_BIT_LH, conaffinity=COLLISION_BIT_LH)
+            _set_cube_collision_group(spec)
+
+        # Re-index home keyframe
+        if pre_qpos is not None and (physics_mode or wrist_mode):
+            _reindex_home_keyframe(
+                spec,
+                pre_qpos,
+                pre_ctrl,
+                physics_mode=physics_mode,
+                wrist_mode=wrist_mode,
+                n_wrist_sets=len(hands),
+            )
+    else:
+        # --- Single-hand mode (backward compatible, no prefix) ---
+        _inject_fingertip_sites(spec, hand_side)
+        _inject_wrist_frame(spec, hand_side)
+
+        if physics_mode:
+            _inject_physics_mode(
+                spec,
+                mount_pos=_parse_float_list(mount_pos),
+                mount_quat=_parse_float_list(mount_quat),
+            )
+        elif wrist_mode == "wrist6dof":
+            _inject_wrist6dof_mode(spec, hinge_order=hinge_order)
+
+        # Re-index home keyframe
+        if pre_qpos is not None and (physics_mode or wrist_mode):
+            _reindex_home_keyframe(
+                spec,
+                pre_qpos,
+                pre_ctrl,
+                physics_mode=physics_mode,
+                wrist_mode=wrist_mode,
+            )
+
+    return spec.compile()
+
+
+# ==============================================================================
+# Private Helpers (MjSpec injection)
+# ==============================================================================
 
 
 def _inject_fingertip_sites(
@@ -114,7 +306,7 @@ def _inject_wrist_frame(
 
     frame_body = hand_root.add_body()
     frame_body.name = f"{name_prefix}palm_frame_body"
-    frame_body.pos = [0, 0, 0.05]
+    frame_body.pos = [0, 0, _PALM_FRAME_Z_OFFSET]
 
     # Yellow sphere marker at palm_frame origin
     frame_site = frame_body.add_site()
@@ -251,9 +443,7 @@ def _inject_wrist6dof_mode(
 
     # --- PD position actuators (appended after XML finger actuators -> ctrl[20:26]) ---
     # force = kp * (ctrl - qpos) - kv * qvel
-    joint_cfgs = [(n, _WRIST6DOF_SLIDE) for n in _WRIST_SLIDE_NAMES] + [
-        (n, _WRIST6DOF_HINGE) for n in hinge_names
-    ]
+    joint_cfgs = [(n, _WRIST6DOF_SLIDE) for n in _WRIST_SLIDE_NAMES] + [(n, _WRIST6DOF_HINGE) for n in hinge_names]
     for joint_name, cfg in joint_cfgs:
         act = spec.add_actuator()
         act.name = f"{joint_prefix}{joint_name}_act"
@@ -299,8 +489,8 @@ def _reindex_home_keyframe(
     """
     if wrist_mode == "wrist6dof":
         # Split pre_qpos into per-hand finger blocks + cube
-        n_finger_per_hand = 20
-        n_cube = 7  # freejoint qpos
+        n_finger_per_hand = N_FINGER_DOF_PER_HAND
+        n_cube = N_CUBE_QPOS
         n_hands = n_wrist_sets
         total_finger = n_hands * n_finger_per_hand
 
@@ -359,6 +549,7 @@ def _set_collision_group(spec: mujoco.MjSpec, body_name: str, contype: int, cona
         contype: New contype value
         conaffinity: New conaffinity value
     """
+
     def _recurse(body):
         for geom in body.geoms:
             if geom.contype > 0 or geom.conaffinity > 0:
@@ -383,11 +574,12 @@ def _set_cube_collision_group(spec: mujoco.MjSpec, body_name: str = "cube") -> N
         spec: MjSpec to modify
         body_name: Cube root body name
     """
+
     def _recurse(body):
         for geom in body.geoms:
             if geom.contype > 0 or geom.conaffinity > 0:
-                geom.contype = 5   # bit 0 + bit 2 (RH + LH)
-                geom.conaffinity = 7  # bit 0 + bit 1 + bit 2 (RH + floor + LH)
+                geom.contype = COLLISION_BIT_RH | COLLISION_BIT_LH
+                geom.conaffinity = COLLISION_BIT_RH | COLLISION_BIT_FLOOR | COLLISION_BIT_LH
         for child in body.bodies:
             _recurse(child)
 
@@ -396,151 +588,6 @@ def _set_cube_collision_group(spec: mujoco.MjSpec, body_name: str = "cube") -> N
         _recurse(body)
 
 
-def _parse_pos_str(pos_str: str) -> list[float]:
-    """Parse space-separated position string to float list."""
-    return [float(x) for x in pos_str.split()]
-
-
-def _parse_quat_str(quat_str: str) -> list[float]:
-    """Parse space-separated quaternion string to float list."""
-    return [float(x) for x in quat_str.split()]
-
-
-# ---------------------------------------------------------------------------
-# Unified entry point
-# ---------------------------------------------------------------------------
-
-# Type alias for multi-hand configuration.
-# Required keys: "side", "wrist_body", "prefix"
-# Optional key: "attach_prefix" — the prefix used in <attach prefix="..."/> in scene XML.
-#   When non-empty, body names become "{attach_prefix}{side}_palm_link" etc.
-#   Solves <custom><numeric> name collision when attaching multiple hand models.
-HandSpec = dict
-
-
-def load_scene_model(
-    scene_xml_path: str,
-    hand_side: str = "right",
-    mount_pos: str = "0 0 0",
-    mount_quat: str = "1 0 0 0",
-    physics_mode: bool = False,
-    wrist_mode: str | None = None,
-    assets: dict[str, bytes] | None = None,
-    hands: list[HandSpec] | None = None,
-    hinge_order: str = "XYZ",
-) -> mujoco.MjModel:
-    """Load a scene with MjSpec injection for non-native elements.
-
-    Scene XML uses <model> + <attach> to load hand and cube from disk.
-    MjSpec injects fingertip sites, debug markers, and physics/wrist elements.
-
-    Two usage modes:
-      1. Single-hand (hands=None): Uses hand_side/mount_pos/etc parameters.
-         Element names are unprefixed for backward compatibility.
-      2. Multi-hand (hands=[...]): Each hand dict specifies side, wrist_body,
-         prefix, and attach_prefix. Scene XML must use matching <attach prefix>.
-
-    Args:
-        scene_xml_path: Absolute path to scene.xml
-        hand_side: "right" or "left" (single-hand mode only)
-        mount_pos: wrist body position string (for physics_mode)
-        mount_quat: wrist body quaternion wxyz string (for physics_mode)
-        physics_mode: If True, add mocap + freejoint + weld constraint
-        wrist_mode: "wrist6dof" for 6-DOF virtual joints with PD actuators
-        assets: Unused (kept for API compatibility)
-        hands: List of hand specs for multi-hand mode. Each dict:
-               {"side": "right"|"left", "wrist_body": str, "prefix": str,
-                "attach_prefix": str}
-               "attach_prefix" must match <attach prefix="..."/> in scene XML
-               so body lookups use the correct prefixed names.
-               When provided, hand_side/mount_pos/mount_quat are ignored.
-
-    Returns:
-        Compiled MjModel ready for simulation or mjx.put_model().
-
-    Raises:
-        ValueError: If both physics_mode and wrist_mode are specified.
-    """
-    if physics_mode and wrist_mode:
-        raise ValueError("Cannot use both physics_mode and wrist_mode simultaneously.")
-
-    # Load scene spec from file (all referenced files resolved from disk)
-    spec = mujoco.MjSpec.from_file(scene_xml_path)
-
-    # Save pre-injection keyframe for re-indexing after joint injection
-    pre_qpos, pre_ctrl = None, None
-    for k in spec.keys:
-        if k.name == "home":
-            pre_qpos = np.array(k.qpos, dtype=np.float64)
-            pre_ctrl = np.array(k.ctrl, dtype=np.float64)
-            break
-
-    if wrist_mode is not None and wrist_mode != "wrist6dof":
-        raise ValueError(f"Unsupported wrist_mode: {wrist_mode!r}. Valid: None, 'wrist6dof'.")
-
-    if hands is not None:
-        # --- Multi-hand mode ---
-        for hand in hands:
-            side = hand["side"]
-            wrist_body = hand["wrist_body"]
-            prefix = hand.get("prefix", "")
-            attach_prefix = hand.get("attach_prefix", "")
-
-            _inject_fingertip_sites(spec, side, name_prefix=prefix, body_prefix=attach_prefix)
-            _inject_wrist_frame(spec, side, name_prefix=prefix, body_prefix=attach_prefix)
-
-            if physics_mode:
-                _inject_physics_mode(
-                    spec,
-                    mount_pos=[0, 0, 0],
-                    mount_quat=[1, 0, 0, 0],
-                    wrist_body_name=wrist_body,
-                    name_prefix=prefix,
-                )
-            elif wrist_mode == "wrist6dof":
-                _inject_wrist6dof_mode(spec, wrist_body_name=wrist_body, joint_prefix=prefix, hinge_order=hinge_order)
-
-        # --- Collision groups: prevent left-right hand collision ---
-        # Bit layout: bit 0 (1) = RH, bit 1 (2) = floor, bit 2 (4) = LH
-        # RH vs LH: (1&4)|(4&1) = 0 → no collision
-        # Both vs Cube: cube contype=5, conaffinity=7 → collides with all
-        if len(hands) == 2:
-            _set_collision_group(spec, hands[0]["wrist_body"], contype=1, conaffinity=1)
-            _set_collision_group(spec, hands[1]["wrist_body"], contype=4, conaffinity=4)
-            _set_cube_collision_group(spec)
-
-        # Re-index home keyframe
-        if pre_qpos is not None and (physics_mode or wrist_mode):
-            _reindex_home_keyframe(
-                spec,
-                pre_qpos,
-                pre_ctrl,
-                physics_mode=physics_mode,
-                wrist_mode=wrist_mode,
-                n_wrist_sets=len(hands),
-            )
-    else:
-        # --- Single-hand mode (backward compatible, no prefix) ---
-        _inject_fingertip_sites(spec, hand_side)
-        _inject_wrist_frame(spec, hand_side)
-
-        if physics_mode:
-            _inject_physics_mode(
-                spec,
-                mount_pos=_parse_pos_str(mount_pos),
-                mount_quat=_parse_quat_str(mount_quat),
-            )
-        elif wrist_mode == "wrist6dof":
-            _inject_wrist6dof_mode(spec, hinge_order=hinge_order)
-
-        # Re-index home keyframe
-        if pre_qpos is not None and (physics_mode or wrist_mode):
-            _reindex_home_keyframe(
-                spec,
-                pre_qpos,
-                pre_ctrl,
-                physics_mode=physics_mode,
-                wrist_mode=wrist_mode,
-            )
-
-    return spec.compile()
+def _parse_float_list(s: str) -> list[float]:
+    """Parse space-separated numeric string to float list."""
+    return [float(x) for x in s.split()]

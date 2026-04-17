@@ -5,12 +5,63 @@ Two classes:
   MuJoCoHandModel -- Pinocchio-based, fixed base, 20 DOF (robot_only mode)
   MuJoCoFloatingHandModel -- MuJoCo-based, 6DOF wrist + 20 finger = 26 DOF (object mode)
 """
+
 from __future__ import annotations
 
+# ==============================================================================
+# Imports
+# ==============================================================================
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import pinocchio as pin
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+
+NUM_FINGERS: int = 5
+"""Number of fingers on the hand."""
+
+WRIST_DOF: int = 6
+"""Number of wrist DOF (3 slide + 3 hinge) for floating base mode."""
+
+# ==============================================================================
+# Protocols
+# ==============================================================================
+
+
+@runtime_checkable
+class HandModelProtocol(Protocol):
+    """Structural interface for hand FK/Jacobian models.
+
+    Both ``MuJoCoHandModel`` (Pinocchio, fixed base) and
+    ``MuJoCoFloatingHandModel`` (MuJoCo, floating base) satisfy this protocol.
+    New hand models (e.g. Allegro, Shadow) should implement these members.
+    """
+
+    nq: int
+    nv: int
+    q_lb: np.ndarray
+    q_ub: np.ndarray
+
+    def forward(self, q: np.ndarray) -> None: ...
+
+    def get_body_pos(self, body_name: str) -> np.ndarray: ...
+
+    def get_body_positions(self, body_names: list[str]) -> np.ndarray: ...
+
+    def get_body_jacp(self, body_name: str) -> np.ndarray: ...
+
+    def get_body_jacobians(self, body_names: list[str]) -> np.ndarray: ...
+
+    def get_default_qpos(self) -> np.ndarray: ...
+
+
+# ==============================================================================
+# Classes
+# ==============================================================================
 
 
 class MuJoCoHandModel:
@@ -19,7 +70,18 @@ class MuJoCoHandModel:
     Name kept as MuJoCoHandModel for backward compatibility with retargeter.py imports.
     """
 
-    def __init__(self, urdf_path: str, probe_offset: float = 0.0):
+    # ==========================================================================
+    # Dunder Methods
+    # ==========================================================================
+
+    def __init__(self, urdf_path: str, probe_offset: float = 0.0) -> None:
+        """Initialize the fixed-base hand model from a URDF.
+
+        Args:
+            urdf_path: Path to the hand URDF file.
+            probe_offset: If > 0, add virtual probe frames offset from each
+                fingertip along its local z-axis. Set to 0 to disable probes.
+        """
         self.model = pin.buildModelFromUrdf(urdf_path)
         self.data = self.model.createData()
         self.nq = self.model.nq  # 20
@@ -39,6 +101,10 @@ class MuJoCoHandModel:
         # Add orientation probe frames if requested
         if probe_offset > 0:
             self._add_probe_frames(probe_offset)
+
+    # ==========================================================================
+    # Public Methods
+    # ==========================================================================
 
     def forward(self, q: np.ndarray) -> None:
         """Set qpos and run forward kinematics."""
@@ -68,9 +134,13 @@ class MuJoCoHandModel:
         return positions
 
     def get_body_jacp(self, body_name: str) -> np.ndarray:
-        """
-        Get translational Jacobian for a body in world frame.
-        Returns (3, nq) matrix: dp/dq.
+        """Get translational Jacobian for a body in world frame.
+
+        Args:
+            body_name: Name of the body frame to query.
+
+        Returns:
+            (3, nq) matrix: dp/dq in world frame.
         """
         fid = self.get_body_id(body_name)
         J_local = pin.getFrameJacobian(self.model, self.data, fid, pin.LOCAL)
@@ -78,9 +148,13 @@ class MuJoCoHandModel:
         return R @ J_local[:3, :]  # (3, nq) in world frame
 
     def get_body_jacobians(self, body_names: list[str]) -> np.ndarray:
-        """
-        Get stacked translational Jacobians for multiple bodies.
-        Returns (3*N, nq) matrix.
+        """Get stacked translational Jacobians for multiple bodies.
+
+        Args:
+            body_names: List of body frame names to query.
+
+        Returns:
+            (3*N, nq) matrix of stacked translational Jacobians.
         """
         N = len(body_names)
         J = np.zeros((3 * N, self.nv))
@@ -88,14 +162,22 @@ class MuJoCoHandModel:
             J[3 * i : 3 * (i + 1), :] = self.get_body_jacp(name)
         return J
 
-    def _add_probe_frames(self, probe_offset: float):
+    def get_default_qpos(self) -> np.ndarray:
+        """Get default (mid-range) joint positions for fixed-base hand."""
+        return (self.q_lb + self.q_ub) / 2.0
+
+    # ==========================================================================
+    # Private Methods
+    # ==========================================================================
+
+    def _add_probe_frames(self, probe_offset: float) -> None:
         """Add virtual probe frames offset from each tip_link along its local z-axis.
 
         These frames encode fingertip orientation as position, enabling
         the Laplacian optimizer to distinguish normal flexion from hyperextension.
         """
         side = "left" if "left_palm_link" in self._frame_ids else "right"
-        for f in range(1, 6):
+        for f in range(1, NUM_FINGERS + 1):
             tip_name = f"{side}_finger{f}_tip_link"
             probe_name = f"{side}_finger{f}_tip_probe"
             if tip_name not in self._frame_ids:
@@ -106,18 +188,17 @@ class MuJoCoHandModel:
             offset_placement = pin.SE3(np.eye(3), np.array([0.0, 0.0, probe_offset]))
             probe_placement = tip_frame.placement * offset_placement
             probe_frame = pin.Frame(
-                probe_name, tip_frame.parentJoint, tip_fid,
-                probe_placement, pin.BODY,
+                probe_name,
+                tip_frame.parentJoint,
+                tip_fid,
+                probe_placement,
+                pin.BODY,
             )
             probe_fid = self.model.addFrame(probe_frame)
             self._frame_ids[probe_name] = probe_fid
 
         # Rebuild data to account for new frames
         self.data = self.model.createData()
-
-    def get_default_qpos(self) -> np.ndarray:
-        """Get default (mid-range) joint positions for fixed-base hand."""
-        return (self.q_lb + self.q_ub) / 2.0
 
 
 class MuJoCoFloatingHandModel:
@@ -130,16 +211,25 @@ class MuJoCoFloatingHandModel:
     The wrist body is 'wuji_wrist' (parent of all hand bodies).
     """
 
-    def __init__(self, scene_xml: str, hand_side: str = "right"):
+    # ==========================================================================
+    # Dunder Methods
+    # ==========================================================================
+
+    def __init__(self, scene_xml: str, hand_side: str = "right") -> None:
+        """Initialize the floating-base hand model from a MuJoCo scene XML.
+
+        Args:
+            scene_xml: Path to the MuJoCo scene XML file.
+            hand_side: Which hand to load, ``"left"`` or ``"right"``.
+        """
         import mujoco as mj
+
         from scene_builder.hand_builder import load_scene_model
 
         self._scene_xml = scene_xml
         self._hand_side = hand_side
         self._has_object = False
-        self.model = load_scene_model(
-            scene_xml, hand_side=hand_side, wrist_mode="wrist6dof"
-        )
+        self.model = load_scene_model(scene_xml, hand_side=hand_side, wrist_mode="wrist6dof")
         self.data = mj.MjData(self.model)
         self.nq = self.model.nq  # 26
         self.nv = self.model.nv  # 26
@@ -152,37 +242,15 @@ class MuJoCoFloatingHandModel:
         self._site_ids = {}
         self._rebuild_caches()
 
-    def _rebuild_caches(self) -> None:
-        """Rebuild body/site ID caches from the current MuJoCo model.
-
-        Called after initial load and after ``inject_object_mesh`` recompiles.
-        """
-        self._body_ids.clear()
-        for i in range(self.model.nbody):
-            name = self.model.body(i).name
-            if name:
-                self._body_ids[name] = i
-
-        self._site_ids.clear()
-        for i in range(self.model.nsite):
-            name = self.model.site(i).name
-            if name:
-                self._site_ids[name] = i
-
-        # Map tip_link names to site names for compatibility with JOINTS_MAPPING
-        # URDF has "right_finger1_tip_link" etc, MuJoCo has "finger1_tip" site
-        side_prefix = f"{self._hand_side}_"
-        for f in range(1, 6):
-            tip_link_name = f"{side_prefix}finger{f}_tip_link"
-            site_name = f"finger{f}_tip"
-            if site_name in self._site_ids:
-                # Register tip_link as a "virtual body" backed by a site
-                self._body_ids[tip_link_name] = -(self._site_ids[site_name] + 1)  # negative = site
+    # ==========================================================================
+    # Public Methods
+    # ==========================================================================
 
     def forward(self, q: np.ndarray) -> None:
         """Set qpos and run forward kinematics."""
         import mujoco as mj
-        self.data.qpos[:self.nq] = q
+
+        self.data.qpos[: self.nq] = q
         mj.mj_forward(self.model, self.data)
 
     def get_body_id(self, body_name: str) -> int:
@@ -208,8 +276,16 @@ class MuJoCoFloatingHandModel:
         return positions
 
     def get_body_jacp(self, body_name: str) -> np.ndarray:
-        """Get translational Jacobian for a body (or site). Returns (3, nq) matrix."""
+        """Get translational Jacobian for a body (or site) in world frame.
+
+        Args:
+            body_name: Name of the body (or site-backed tip_link) to query.
+
+        Returns:
+            (3, nq) matrix: dp/dq in world frame.
+        """
         import mujoco as mj
+
         bid = self.get_body_id(body_name)
         jacp = np.zeros((3, self.nv))
         if bid < 0:
@@ -221,7 +297,14 @@ class MuJoCoFloatingHandModel:
         return jacp
 
     def get_body_jacobians(self, body_names: list[str]) -> np.ndarray:
-        """Get stacked translational Jacobians. Returns (3*N, nq) matrix."""
+        """Get stacked translational Jacobians for multiple bodies.
+
+        Args:
+            body_names: List of body names to query.
+
+        Returns:
+            (3*N, nq) matrix of stacked translational Jacobians.
+        """
         N = len(body_names)
         J = np.zeros((3 * N, self.nv))
         for i, name in enumerate(body_names):
@@ -231,25 +314,28 @@ class MuJoCoFloatingHandModel:
     def get_default_qpos(self) -> np.ndarray:
         """Get default joint positions (wrist at zero, fingers at mid-range)."""
         q = np.zeros(self.nq)
-        q[6:] = (self.q_lb[6:] + self.q_ub[6:]) / 2.0
+        q[WRIST_DOF:] = (self.q_lb[WRIST_DOF:] + self.q_ub[WRIST_DOF:]) / 2.0
         return q
 
-    # ----------------------------------------------------------------
-    # Object injection + collision queries for non-penetration constraint
-    # ----------------------------------------------------------------
-
-    def inject_object_mesh(self, mesh_path: str, hand_side: str = "left"):
+    def inject_object_mesh(self, mesh_path: str, hand_side: str = "left") -> None:
         """Rebuild model with object mesh for collision queries.
 
         Injects object as a mocap body with collision geom (contype=2, conaffinity=1).
         Hand geoms are set to contype=1, conaffinity=2 before compile.
 
         Args:
-            mesh_path: absolute path to object STL file
-            hand_side: "left" or "right"
+            mesh_path: Absolute path to object STL file.
+            hand_side: ``"left"`` or ``"right"``.
+
+        Raises:
+            FileNotFoundError: If ``mesh_path`` does not exist (raised by MuJoCo at compile).
         """
         import mujoco as mj
-        from scene_builder.hand_builder import _inject_wrist6dof_mode, _inject_fingertip_sites
+
+        from scene_builder.hand_builder import (
+            _inject_fingertip_sites,
+            _inject_wrist6dof_mode,
+        )
 
         scene_xml = self._scene_xml
         spec = mj.MjSpec.from_file(scene_xml)
@@ -263,6 +349,7 @@ class MuJoCoFloatingHandModel:
                 g.conaffinity = 2
             for c in body.bodies:
                 _enable_col(c)
+
         _enable_col(spec.body("wuji_wrist"))
 
         # Add object as mocap body
@@ -289,8 +376,8 @@ class MuJoCoFloatingHandModel:
 
         # Cache fingertip collision geom ids (link4_col geoms)
         self._tip_col_geom_ids = []
-        for f in range(1, 6):
-            gname = f"{side_prefix}finger{f}_link4_col"
+        for f in range(1, NUM_FINGERS + 1):
+            gname = f"{hand_side}_finger{f}_link4_col"
             for i in range(self.model.ngeom):
                 if self.model.geom(i).name == gname:
                     self._tip_col_geom_ids.append(i)
@@ -300,15 +387,20 @@ class MuJoCoFloatingHandModel:
         self._obj_geom_id = self.model.geom("retarget_obj_geom").id
         self._has_object = True
 
-    def set_object_pose(self, pos: np.ndarray, quat_xyzw: np.ndarray):
+    def set_object_pose(self, pos: np.ndarray, quat_xyzw: np.ndarray) -> None:
         """Set object mocap pose (call before forward/collision queries).
 
         Args:
-            pos: (3,) world position
-            quat_xyzw: (4,) quaternion in xyzw (scipy) convention
+            pos: (3,) world position.
+            quat_xyzw: (4,) quaternion in xyzw (scipy) convention.
         """
         self.data.mocap_pos[0] = pos
-        self.data.mocap_quat[0] = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
+        self.data.mocap_quat[0] = [
+            quat_xyzw[3],
+            quat_xyzw[0],
+            quat_xyzw[1],
+            quat_xyzw[2],
+        ]
 
     def query_tip_penetration(self, threshold: float = 0.05) -> list[tuple[np.ndarray, float, int]]:
         """Query signed distances between fingertip geoms and object.
@@ -334,9 +426,7 @@ class MuJoCoFloatingHandModel:
         jacp = np.zeros((3, self.nv))
 
         for tip_idx, gid in enumerate(self._tip_col_geom_ids):
-            phi = mj.mj_geomDistance(
-                self.model, self.data, gid, self._obj_geom_id, threshold, fromto
-            )
+            phi = mj.mj_geomDistance(self.model, self.data, gid, self._obj_geom_id, threshold, fromto)
             if phi > threshold:
                 continue
 
@@ -359,3 +449,38 @@ class MuJoCoFloatingHandModel:
             results.append((J_contact.copy(), phi, tip_idx))
 
         return results
+
+    # ==========================================================================
+    # Private Methods
+    # ==========================================================================
+
+    def _rebuild_caches(self) -> None:
+        """Rebuild body/site ID caches from the current MuJoCo model.
+
+        Populates ``_body_ids`` and ``_site_ids`` dictionaries, and registers
+        tip_link names as virtual bodies backed by fingertip sites for
+        compatibility with ``JOINTS_MAPPING``.
+
+        Called after initial load and after ``inject_object_mesh`` recompiles.
+        """
+        self._body_ids.clear()
+        for i in range(self.model.nbody):
+            name = self.model.body(i).name
+            if name:
+                self._body_ids[name] = i
+
+        self._site_ids.clear()
+        for i in range(self.model.nsite):
+            name = self.model.site(i).name
+            if name:
+                self._site_ids[name] = i
+
+        # Map tip_link names to site names for compatibility with JOINTS_MAPPING
+        # URDF has "right_finger1_tip_link" etc, MuJoCo has "finger1_tip" site
+        side_prefix = f"{self._hand_side}_"
+        for f in range(1, NUM_FINGERS + 1):
+            tip_link_name = f"{side_prefix}finger{f}_tip_link"
+            site_name = f"finger{f}_tip"
+            if site_name in self._site_ids:
+                # Register tip_link as a "virtual body" backed by a site
+                self._body_ids[tip_link_name] = -(self._site_ids[site_name] + 1)  # negative = site

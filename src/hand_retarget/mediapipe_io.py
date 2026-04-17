@@ -5,19 +5,22 @@ Handles .pkl files in the same format as wuji_retargeting baseline.
 Uses the baseline's apply_mediapipe_transformations to ensure identical
 coordinate frame alignment (SVD frame estimation + OPERATOR2MANO rotation).
 """
+
 from __future__ import annotations
 
+# ==============================================================================
+# Imports
+# ==============================================================================
 import pickle
 from pathlib import Path
 
 import numpy as np
 from scipy.spatial.transform import Rotation
-
 from wuji_retargeting.mediapipe import apply_mediapipe_transformations
 
-
-# apply_segment_scaling removed: interaction mesh uses global scale only (like OmniRetarget's smpl_scale)
-# Per-segment scaling is a baseline-specific workaround for direct IK position matching
+# ==============================================================================
+# Functions
+# ==============================================================================
 
 
 def load_pkl_sequence(pkl_path: str, hand_side: str = "left") -> tuple[np.ndarray, np.ndarray]:
@@ -50,7 +53,7 @@ def load_pkl_sequence(pkl_path: str, hand_side: str = "left") -> tuple[np.ndarra
 
 def preprocess_landmarks(
     landmarks: np.ndarray,
-    mediapipe_rotation: dict,
+    mediapipe_rotation: dict[str, float],
     hand_side: str = "left",
     global_scale: float = 1.0,
     use_mano_rotation: bool = True,
@@ -96,7 +99,7 @@ def preprocess_landmarks(
 
 def preprocess_sequence(
     landmarks_seq: np.ndarray,
-    mediapipe_rotation: dict,
+    mediapipe_rotation: dict[str, float],
     hand_side: str = "left",
     global_scale: float = 1.0,
 ) -> np.ndarray:
@@ -114,13 +117,12 @@ def preprocess_sequence(
     """
     result = np.zeros_like(landmarks_seq)
     for t in range(len(landmarks_seq)):
-        result[t] = preprocess_landmarks(
-            landmarks_seq[t], mediapipe_rotation, hand_side, global_scale
-        )
+        result[t] = preprocess_landmarks(landmarks_seq[t], mediapipe_rotation, hand_side, global_scale)
     return result
 
 
 # --- HO-Cap data loading ---
+
 
 def sample_object_surface(mesh_path: str, count: int = 100, seed: int = 0) -> np.ndarray:
     """
@@ -135,6 +137,7 @@ def sample_object_surface(mesh_path: str, count: int = 100, seed: int = 0) -> np
         (count, 3) array of surface points in mesh local frame
     """
     import trimesh
+
     mesh = trimesh.load(str(mesh_path))
     pts, _ = trimesh.sample.sample_surface(mesh, count, seed=seed)
     return pts.astype(np.float64)
@@ -152,14 +155,13 @@ def transform_object_points(pts_local: np.ndarray, quat: np.ndarray, trans: np.n
     Returns:
         (M, 3) points in world frame
     """
-    from scipy.spatial.transform import Rotation as R
-    rot = R.from_quat(quat).as_matrix()
+    rot = Rotation.from_quat(quat).as_matrix()
     return (rot @ pts_local.T).T + trans
 
 
-def load_hocap_clip(npz_path: str, meta_path: str, assets_dir: str,
-                    hand_side: str = "left",
-                    sample_count: int = 100) -> dict:
+def load_hocap_clip(
+    npz_path: str, meta_path: str, assets_dir: str, hand_side: str = "left", sample_count: int = 100
+) -> dict:
     """
     Load a HO-Cap clip with hand landmarks + object data.
 
@@ -181,7 +183,6 @@ def load_hocap_clip(npz_path: str, meta_path: str, assets_dir: str,
           mesh_path: str
     """
     import json
-    from pathlib import Path
 
     # Load motion data
     data = np.load(npz_path, allow_pickle=True)
@@ -200,8 +201,12 @@ def load_hocap_clip(npz_path: str, meta_path: str, assets_dir: str,
     # Wrist pose (for direct assignment if needed)
     wrist_t_key = f"wrist_t_{hand_side[0]}"
     wrist_q_key = f"wrist_q_{hand_side[0]}"
-    wrist_t = data[wrist_t_key].astype(np.float64) if wrist_t_key in data and data[wrist_t_key].dtype != object else None
-    wrist_q = data[wrist_q_key].astype(np.float64) if wrist_q_key in data and data[wrist_q_key].dtype != object else None
+    wrist_t = (
+        data[wrist_t_key].astype(np.float64) if wrist_t_key in data and data[wrist_t_key].dtype != object else None
+    )
+    wrist_q = (
+        data[wrist_q_key].astype(np.float64) if wrist_q_key in data and data[wrist_q_key].dtype != object else None
+    )
 
     # Load meta to get asset name
     with open(meta_path) as f:
