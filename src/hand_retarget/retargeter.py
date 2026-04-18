@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import cvxpy as cp
 import numpy as np
+import qpsolvers
 from scipy import sparse as sp
 from scipy.spatial.transform import Rotation as RotLib
 from tqdm import tqdm
@@ -43,8 +44,8 @@ from .mujoco_hand import MuJoCoHandModel
 # Constants
 # ==============================================================================
 
-DEFAULT_LAPLACIAN_WEIGHT: float = 10.0
-"""Laplacian deformation energy weight (matches OmniRetarget: self.laplacian_weights = 10)."""
+DEFAULT_LAPLACIAN_WEIGHT: float = 5.0
+"""Laplacian deformation energy weight. Default 5.0 for 5:5:1 ratio (anchor:lap:smooth)."""
 
 PINCH_DISTANCE_MIN: float = 0.010
 """Full pinch distance threshold in meters (10mm)."""
@@ -294,70 +295,64 @@ class InteractionMeshHandRetargeter:
             w_v = self.laplacian_weight * np.ones(V)
         sqrt_w3 = np.sqrt(np.repeat(w_v, 3))
 
-        # Decision variables
-        dq = cp.Variable(self.nq, name="dq")
-        lap_var = cp.Variable(3 * V, name="lap")
+        # Eliminate lap_var via equality constraint:
+        # lap_var = J_L @ dq + lap0_vec
+        # Cost becomes: ||sqrt_w * (J_L @ dq + lap0 - target_lap)||^2
+        lap_residual = lap0_vec - target_lap_vec  # (3V,)
+        J_w = np.diag(sqrt_w3) @ J_L.toarray() if sp.issparse(J_L) else np.diag(sqrt_w3) @ J_L
+        r_w = sqrt_w3 * lap_residual
 
-        # Constraints
-        constraints = []
-
-        # Laplacian linearization equality (OmniRetarget L582)
-        constraints.append(cp.Constant(J_L) @ dq - lap_var == -lap0_vec)
-
-        # Joint limits (OmniRetarget L640-644)
-        if self.config.activate_joint_limits:
-            constraints.append(dq >= self.q_lb - q_current)
-            constraints.append(dq <= self.q_ub - q_current)
-
-        # Trust region SOC (OmniRetarget L647)
-        constraints.append(cp.SOC(self.config.step_size, dq))
-
-        # Objective
-        obj_terms = []
-
-        # Weighted Laplacian deformation energy (OmniRetarget L652)
-        obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
-
-        # Temporal smoothness (OmniRetarget L666-668)
+        # Build QP: min (1/2) dq^T H dq + c^T dq
+        nq = self.nq
         dq_smooth = q_prev_frame - q_current
-        obj_terms.append(self.config.smooth_weight * cp.sum_squares(dq - dq_smooth))
 
-        # Angle anchor: keep joint angles close to S1 cosine IK targets
+        # H = J_w^T J_w + smooth * I + damping
+        H = J_w.T @ J_w + self.config.smooth_weight * np.eye(nq) + 1e-12 * np.eye(nq)
+        c = J_w.T @ r_w - self.config.smooth_weight * dq_smooth
+
+        # Angle anchor contribution
         if angle_targets is not None:
             target_q, confidence = angle_targets
-            q_after = q_current + dq
-            angle_residuals = []
-            for j in range(self.nq):
+            angle_diff = q_current - target_q  # residual at current q
+            for j in range(nq):
                 if confidence[j] > 0:
-                    angle_residuals.append(
-                        confidence[j] * self.config.angle_anchor_weight * (q_after[j] - target_q[j]) ** 2
-                    )
-            if angle_residuals:
-                obj_terms.append(cp.sum(angle_residuals))
+                    w_a = confidence[j] * self.config.angle_anchor_weight
+                    H[j, j] += w_a
+                    c[j] += w_a * angle_diff[j]
 
-        # Non-penetration hard constraint (OmniRetarget formula 3b)
-        # Allow penetration up to capsule radius (normal contact = capsule surface on object)
+        # Box constraints: joint limits + trust region
+        lb = -self.config.step_size * np.ones(nq)
+        ub = self.config.step_size * np.ones(nq)
+        if self.config.activate_joint_limits:
+            lb = np.maximum(lb, self.q_lb - q_current)
+            ub = np.minimum(ub, self.q_ub - q_current)
+
+        # Non-penetration: linear inequality constraints G @ dq <= h
+        G_rows = []
+        h_vals = []
         if self.config.activate_non_penetration and hasattr(self.hand, "query_tip_penetration"):
             for J_contact, phi, _ in self.hand.query_tip_penetration(threshold=PENETRATION_QUERY_THRESHOLD):
-                constraints.append(J_contact @ dq >= -phi - CAPSULE_RADIUS)
+                # J_contact @ dq >= -phi - capsule_radius  →  -J_contact @ dq <= phi + capsule_radius
+                G_rows.append(-J_contact.reshape(1, -1))
+                h_vals.append(phi + CAPSULE_RADIUS)
 
-        # Solve
-        problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
-        problem.solve(solver=cp.CLARABEL, verbose=False)
+        G = np.vstack(G_rows) if G_rows else None
+        h = np.array(h_vals) if h_vals else None
 
-        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            # Fallback: remove SOC and retry (OmniRetarget L682-685)
-            constraints_no_soc = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
-            problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints_no_soc)
-            problem.solve(solver=cp.CLARABEL, verbose=False)
+        problem = qpsolvers.Problem(H, c, G=G, h=h, lb=lb, ub=ub)
+        solution = qpsolvers.solve_problem(problem, solver="daqp")
 
-        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+        if not solution.found:
             return q_current.copy(), float("inf")
 
-        q_new = q_current + dq.value
+        dq_val = solution.x
+        q_new = q_current + dq_val
         q_new = np.clip(q_new, self.q_lb, self.q_ub)
 
-        return q_new, problem.value
+        # Compute cost for convergence check
+        cost = 0.5 * dq_val @ H @ dq_val + c @ dq_val
+
+        return q_new, cost
 
     def solve_single_iteration_arap(
         self,
@@ -654,25 +649,29 @@ class InteractionMeshHandRetargeter:
             if not residuals:
                 break
 
-            r_vec = np.concatenate(residuals)
-            J_mat = np.vstack(J_rows)
-
-            # Solve QP: min ||r + J @ dq||^2 + smooth
-            dq = cp.Variable(self.nq)
-            obj = cp.sum_squares(r_vec + cp.Constant(J_mat) @ dq)
+            # Build QP directly: min (1/2) dq^T H dq + c^T dq
+            # from ||r + J @ dq||^2 + smooth * ||dq - dq_smooth||^2
+            nq = self.nq
             dq_smooth = q_prev - q_current
-            obj += self.config.smooth_weight * cp.sum_squares(dq - dq_smooth)
 
-            constraints = [
-                dq >= self.q_lb - q_current,
-                dq <= self.q_ub - q_current,
-                cp.SOC(self.config.step_size, dq),
-            ]
-            prob = cp.Problem(cp.Minimize(obj), constraints)
-            prob.solve(solver=cp.CLARABEL, verbose=False)
+            # Accumulate H = J^T J + smooth * I, c = J^T r - smooth * dq_smooth
+            H = self.config.smooth_weight * np.eye(nq) + 1e-12 * np.eye(nq)
+            c = -self.config.smooth_weight * dq_smooth
 
-            if prob.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-                q_current = q_current + dq.value
+            for res, J_row in zip(residuals, J_rows):
+                # res: (3,), J_row: (3, nq)
+                H += J_row.T @ J_row
+                c += J_row.T @ res
+
+            # Box constraints: joint limits + trust region
+            lb = np.maximum(self.q_lb - q_current, -self.config.step_size)
+            ub = np.minimum(self.q_ub - q_current, self.config.step_size)
+
+            problem = qpsolvers.Problem(H, c, lb=lb, ub=ub)
+            solution = qpsolvers.solve_problem(problem, solver="daqp")
+
+            if solution.found:
+                q_current = q_current + solution.x
                 q_current = np.clip(q_current, self.q_lb, self.q_ub)
 
         return q_current
@@ -706,9 +705,17 @@ class InteractionMeshHandRetargeter:
         self.config.angle_warmup_iters = old_iters
 
         confidence = np.ones(self.nq)
-        # MCP abduction has lower confidence (extraction less reliable)
-        for f in range(5):
-            confidence[4 * f + 1] = 0.5
+        if self.config.floating_base and self.nq > 20:
+            # Wrist translation (first 3 DOF): no angle anchor (position, not angle)
+            confidence[:3] = 0.0
+            # Wrist rotation (DOF 3-5): anchor to S1's alignment
+            confidence[3:6] = 0.5
+            # Finger MCP abduction: lower confidence
+            for f in range(5):
+                confidence[6 + 4 * f + 1] = 0.5
+        else:
+            for f in range(5):
+                confidence[4 * f + 1] = 0.5
         return q_target, confidence
 
     def retarget_frame(
@@ -987,7 +994,6 @@ class InteractionMeshHandRetargeter:
         obj_pts_local = clip["object_pts_local"]  # (M, 3) mesh local
         obj_t = clip["object_t"]  # (T, 3)
         obj_q = clip["object_q"]  # (T, 4)
-        wrist_q_seq = clip.get("wrist_q")  # (T, 4) xyzw or None
         T = len(landmarks_raw)
 
         qpos_seq = np.zeros((T, self.nq))
@@ -999,8 +1005,10 @@ class InteractionMeshHandRetargeter:
         saved_n_iter_first = self.config.n_iter_first
 
         if self.config.floating_base and self.nq > 20:
-            self.q_lb[:3] = 0.0
-            self.q_ub[:3] = 0.0
+            # Lock all 6 wrist DOF: position (0:3) and rotation (3:6)
+            # SVD+MANO alignment puts landmarks in robot wrist frame already
+            self.q_lb[:6] = 0.0
+            self.q_ub[:6] = 0.0
         # Override n_iter_first for HO-Cap (200 iters for complex object scenes).
         # Uses save/restore because retarget_frame reads self.config.n_iter_first directly.
         self.config.n_iter_first = HOCAP_N_ITER_FIRST
@@ -1022,41 +1030,25 @@ class InteractionMeshHandRetargeter:
         try:
             for t in tqdm(range(T), desc="Retargeting (obj mode)"):
                 obj_world = transform_object_points(obj_pts_local, obj_q[t], obj_t[t])
-                wrist_q_t = wrist_q_seq[t] if wrist_q_seq is not None else None
-                lm, obj_transformed = self._align_frame(landmarks_raw[t], wrist_q_t, obj_world)
+                # Force SVD alignment (more reliable than wrist_q for HO-Cap data)
+                lm, obj_transformed = self._align_frame(landmarks_raw[t], None, obj_world)
 
                 # Update object pose in retargeter's MuJoCo model (for collision queries)
                 # Object pose must be in the same aligned frame as hand landmarks
+                # SVD alignment is forced (wrist_q=None), so use raw object pose
                 if self.config.activate_non_penetration and self.hand._has_object:
-                    # Object center in aligned frame = transform(obj_center_world) via same R_align
                     wrist_world = landmarks_raw[t, 0]
                     obj_center_aligned = obj_t[t] - wrist_world
-                    if wrist_q_t is not None:
-                        R_wrist = RotLib.from_quat(wrist_q_t).as_matrix()
-                        R_align = R_wrist.T @ self._R_mano
-                        obj_center_aligned = obj_center_aligned @ R_align
-                        # Object rotation in aligned frame
-                        R_obj_world = RotLib.from_quat(obj_q[t]).as_matrix()
-                        R_obj_aligned = R_align.T @ R_obj_world
-                        obj_quat_aligned = RotLib.from_matrix(R_obj_aligned).as_quat()  # xyzw
-                    else:
-                        obj_quat_aligned = obj_q[t]
+                    obj_quat_aligned = obj_q[t]
                     self.hand.set_object_pose(obj_center_aligned, obj_quat_aligned)
 
                 # Build object-frame transform if enabled
                 # obj_transformed and lm are in wrist-aligned frame
-                # Object pose in aligned frame: center + rotation
+                # SVD alignment is forced (wrist_q=None), so use identity rotation
                 if self.config.use_object_frame:
                     wrist_world = landmarks_raw[t, 0]
                     obj_c = obj_t[t] - wrist_world
-                    if wrist_q_t is not None:
-                        R_wrist = RotLib.from_quat(wrist_q_t).as_matrix()
-                        R_align = R_wrist.T @ self._R_mano
-                        obj_c = obj_c @ R_align
-                        R_obj_w = RotLib.from_quat(obj_q[t]).as_matrix()
-                        R_obj_a = R_align.T @ R_obj_w
-                    else:
-                        R_obj_a = np.eye(3)
+                    R_obj_a = np.eye(3)
                     R_obj_inv = R_obj_a.T
                     frame_arg = (R_obj_inv, obj_c)
                     # Object points in their own local frame (pre-sampled mesh coords)

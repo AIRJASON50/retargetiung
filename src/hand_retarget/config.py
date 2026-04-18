@@ -188,8 +188,7 @@ class HandRetargetConfig:
     floating_base: bool = False  # True: 6DOF wrist + 20 finger = 26 DOF (object mode)
 
     # Optimization
-    step_size: float = 0.1  # Trust region radius (SOC constraint)
-    smooth_weight: float = 0.2  # Temporal smoothness weight (matches OmniRetarget default)
+    step_size: float = 0.1  # Trust region radius (box constraint)
     n_iter_first: int = 50  # SQP iterations for first frame
     n_iter: int = 10  # SQP iterations for subsequent frames
     activate_joint_limits: bool = True
@@ -232,11 +231,14 @@ class HandRetargetConfig:
     # Link-midpoint IM: use 20 link midpoints instead of 21 joint origins
     use_link_midpoints: bool = False
 
-    # Two-stage: angle warmup (Stage 1) before Laplacian (Stage 2)
-    use_angle_warmup: bool = False
+    # Two-stage: S1 cosine IK bone direction alignment + S2 Laplacian position refinement
+    # Joint cost: anchor_weight * angle_error + laplacian_weight * lap_error + smooth_weight * smooth
+    # Default 5:5:1 ratio (anchor=5, laplacian via retargeter.laplacian_weight, smooth=1)
+    use_angle_warmup: bool = True
     angle_warmup_weight: float = 5.0
     angle_warmup_iters: int = 3
-    angle_anchor_weight: float = 5.0  # S1 angle anchor in joint cost (S1:S2 ratio = anchor:laplacian)
+    angle_anchor_weight: float = 5.0  # S1 angle anchor in joint cost
+    smooth_weight: float = 1.0  # Temporal smoothness (5:5:1 ratio with anchor and laplacian)
     exclude_fingers_from_laplacian: list = None  # Finger indices (0-4) excluded from Laplacian gradient
 
     # Edge ratio energy (Zhang 2023): replace Laplacian with per-edge ratio cost

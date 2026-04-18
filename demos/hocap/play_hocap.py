@@ -119,16 +119,20 @@ def retarget_hand(clip: dict, hand_side: str, scene_xml: Path,
     T = len(clip["landmarks"])
     R_inv_list = []
     wrist_list = []
-    wrist_q_seq = clip.get("wrist_q")
 
     for t in range(T):
         wrist_list.append(clip["landmarks"][t, 0].copy())
-        if wrist_q_seq is not None:
-            R_wrist = RotLib.from_quat(wrist_q_seq[t]).as_matrix()
-            R_align = R_wrist.T @ retargeter._R_mano
-            R_inv_list.append(R_align.T)
+        # Use SVD alignment (consistent with retarget_hocap_sequence which forces SVD)
+        from wuji_retargeting.mediapipe import estimate_frame_from_hand_points
+        lm_centered = clip["landmarks"][t] - clip["landmarks"][t, 0]
+        R_svd = estimate_frame_from_hand_points(lm_centered)
+        if retargeter.config.hand_side == "left":
+            from wuji_retargeting.mediapipe import OPERATOR2MANO_LEFT
+            R_align = R_svd @ np.array(OPERATOR2MANO_LEFT)
         else:
-            R_inv_list.append(np.eye(3))
+            from wuji_retargeting.mediapipe import OPERATOR2MANO_RIGHT
+            R_align = R_svd @ np.array(OPERATOR2MANO_RIGHT)
+        R_inv_list.append(R_align.T)
 
     return {
         "qpos": qpos,
