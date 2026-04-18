@@ -60,8 +60,8 @@
 - [x] Update YAML config (smooth=1.0, angle_warmup enabled) (smooth_weight 0.2 → 1.0, add angle_warmup section)
 
 ### Phase 5: Documentation
-- [ ] Update CLAUDE.md
-- [ ] Update doc/improvement_plan.md
+- [x] Update CLAUDE.md (完全重写)
+- [x] Update doc/improvement_plan.md (完全重写)
 - [x] Delete doc/trajmd
 - [x] ruff format all files all files
 
