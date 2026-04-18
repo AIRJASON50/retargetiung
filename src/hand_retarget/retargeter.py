@@ -58,9 +58,6 @@ CAPSULE_RADIUS: float = 0.0075
 PENETRATION_QUERY_THRESHOLD: float = 0.05
 """Max signed distance (meters) for fingertip-object proximity queries."""
 
-ARAP_LAPLACIAN_WARMUP: int = 20
-"""Number of Laplacian warmup iterations before switching to ARAP edge energy (first frame)."""
-
 HOCAP_N_ITER_FIRST: int = 200
 """SQP iterations for the first frame in HO-Cap object-interaction mode."""
 
@@ -104,8 +101,7 @@ class InteractionMeshHandRetargeter:
 
             self.hand = MuJoCoFloatingHandModel(config.mjcf_path, config.hand_side)
         else:
-            probe_offset = config.probe_offset if config.use_orientation_probes else 0.0
-            self.hand = MuJoCoHandModel(config.mjcf_path, probe_offset=probe_offset)
+            self.hand = MuJoCoHandModel(config.mjcf_path)
 
         # Keypoint mapping: sorted by MediaPipe index
         self.mp_indices = sorted(config.joints_mapping.keys())
@@ -134,25 +130,6 @@ class InteractionMeshHandRetargeter:
         # Cached topology per frame (rebuilt each frame from source points)
         self._adj_list: list[list[int]] | None = None
 
-        # Per-segment bone-ratio auto-scaling
-        # Each finger has 4 segments: Wrist-MCP, MCP-PIP, PIP-DIP, DIP-TIP
-        # Segment chains: list of consecutive MediaPipe index pairs per finger
-        self._bone_ratios: np.ndarray | None = None  # (5, 4) array, computed after warmup
-        self._warmup_seg_lengths: list[np.ndarray] = []  # list of (5, 4) per-frame segment lengths
-        self._finger_segments = [
-            [(0, 1), (1, 2), (2, 3), (3, 4)],  # Thumb: Wrist-CMC, CMC-MCP, MCP-IP, IP-TIP
-            [(0, 5), (5, 6), (6, 7), (7, 8)],  # Index: Wrist-MCP, MCP-PIP, PIP-DIP, DIP-TIP
-            [(0, 9), (9, 10), (10, 11), (11, 12)],  # Middle
-            [(0, 13), (13, 14), (14, 15), (15, 16)],  # Ring
-            [(0, 17), (17, 18), (18, 19), (19, 20)],  # Pinky
-        ]
-        # Non-thumb MCP MediaPipe indices (index, middle, ring, pinky)
-        self._palm_mcp_mp = [5, 9, 13, 17]
-        # Palm spread: lateral distance index_MCP -> pinky_MCP
-        self._palm_spread_ratio: float | None = None
-        self._warmup_palm_spreads: list[float] = []  # palm spreads after radial scaling, per warmup frame
-        if config.use_bone_scaling:
-            self._robot_seg_lengths, self._robot_palm_spread = self._compute_robot_segment_lengths()
 
         # OPERATOR2MANO: fixed rotation from MediaPipe wrist convention -> robot palm convention
         if config.hand_side == "left":
@@ -188,8 +165,6 @@ class InteractionMeshHandRetargeter:
                             self._excluded_finger_kp_indices.append(self.mp_indices.index(mp_idx))
 
         # Edge ratio: T-pose refs (computed on first frame)
-        self._er_source_tpose: np.ndarray | None = None
-        self._er_robot_tpose: np.ndarray | None = None
 
         # Angle warmup: cache T-pose body points at default pose
         if config.use_angle_warmup:
@@ -349,211 +324,6 @@ class InteractionMeshHandRetargeter:
         cost = 0.5 * dq_val @ H @ dq_val + c @ dq_val
 
         return q_new, cost
-
-    def solve_single_iteration_arap(
-        self,
-        q_current: np.ndarray,
-        q_prev_frame: np.ndarray,
-        source_pts: np.ndarray,
-        adj_list: list[list[int]],
-        semantic_weights: np.ndarray | None = None,
-        object_pts_world: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, float]:
-        """Single SQP iteration with ARAP per-edge energy.
-
-        Replaces Laplacian deformation cost with:
-            sum_{(i,j)} w_ij * ||(robot_i - robot_j) - R_i @ (source_i - source_j)||^2
-
-        No auxiliary lap_var variable needed -- directly quadratic in dq.
-
-        Args:
-            q_current: (nq,) current joint angles (linearization point).
-            q_prev_frame: (nq,) joint angles from previous frame (for smoothness).
-            source_pts: (V, 3) source keypoints (hand + optional object).
-            adj_list: Adjacency list from Delaunay.
-            semantic_weights: (V,) per-keypoint weights, or None for uniform.
-            object_pts_world: (M, 3) object surface points in world frame, or
-                None.
-
-        Returns:
-            Tuple of (q_new, cost): updated joint angles and optimization cost.
-        """
-        n_hand = self.n_keypoints
-
-        # FK at current q
-        self.hand.forward(q_current)
-        hand_pts = self._get_robot_keypoints()
-
-        # Combined vertices
-        if object_pts_world is not None:
-            robot_pts = np.vstack([hand_pts, object_pts_world])
-            source_full = source_pts
-        else:
-            robot_pts = hand_pts
-            source_full = source_pts
-
-        V = len(robot_pts)
-
-        # Jacobians
-        J_hand = self._get_robot_jacobians()
-        J_V = np.zeros((3 * V, self.nq))
-        J_V[: 3 * n_hand, :] = J_hand
-
-        # Per-vertex rotations (ARAP local step)
-        rotations = estimate_per_vertex_rotations(source_full, robot_pts, adj_list)
-
-        # Edge residuals and Jacobian
-        edges, residuals, J_edge = compute_arap_edge_data(
-            source_full,
-            robot_pts,
-            adj_list,
-            rotations,
-            J_V,
-            self.nq,
-        )
-        E = len(edges)
-
-        # Per-edge weights from semantic weights
-        if semantic_weights is not None:
-            # Edge weight = mean of endpoint weights
-            w_e = np.array([0.5 * (semantic_weights[i] + semantic_weights[j]) for i, j in edges])
-            w_e *= self.laplacian_weight
-        else:
-            w_e = self.laplacian_weight * np.ones(E)
-        sqrt_w3 = np.sqrt(np.repeat(w_e, 3))
-
-        # Decision variable: just dq (no auxiliary lap_var)
-        dq = cp.Variable(self.nq, name="dq")
-
-        # Constraints
-        constraints = []
-        if self.config.activate_joint_limits:
-            constraints.append(dq >= self.q_lb - q_current)
-            constraints.append(dq <= self.q_ub - q_current)
-        constraints.append(cp.SOC(self.config.step_size, dq))
-
-        # ARAP edge cost: ||sqrt_w * (residual + J_edge @ dq)||^2
-        obj_terms = []
-        obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, residuals + cp.Constant(J_edge) @ dq)))
-
-        # Temporal smoothness
-        dq_smooth = q_prev_frame - q_current
-        obj_terms.append(self.config.smooth_weight * cp.sum_squares(dq - dq_smooth))
-
-        # Non-penetration
-        if self.config.activate_non_penetration and hasattr(self.hand, "query_tip_penetration"):
-            for J_contact, phi, _ in self.hand.query_tip_penetration(threshold=PENETRATION_QUERY_THRESHOLD):
-                constraints.append(J_contact @ dq >= -phi - CAPSULE_RADIUS)
-
-        # Solve
-        problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
-        problem.solve(solver=cp.CLARABEL, verbose=False)
-
-        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            constraints_no_soc = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
-            problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints_no_soc)
-            problem.solve(solver=cp.CLARABEL, verbose=False)
-
-        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            return q_current.copy(), float("inf")
-
-        q_new = q_current + dq.value
-        q_new = np.clip(q_new, self.q_lb, self.q_ub)
-        return q_new, problem.value
-
-    def solve_single_iteration_edge_ratio(
-        self,
-        q_current: np.ndarray,
-        q_prev_frame: np.ndarray,
-        source_pts: np.ndarray,
-        adj_list: list[list[int]],
-        semantic_weights: np.ndarray | None = None,
-        object_pts_world: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, float]:
-        """Single SQP iteration with Zhang 2023 edge ratio energy.
-
-        Args:
-            q_current: (nq,) current joint angles (linearization point).
-            q_prev_frame: (nq,) joint angles from previous frame (for smoothness).
-            source_pts: (V, 3) source keypoints (hand + optional object).
-            adj_list: Adjacency list from Delaunay.
-            semantic_weights: (V,) per-keypoint weights, or None for uniform.
-            object_pts_world: (M, 3) object surface points in world frame, or None.
-
-        Returns:
-            Tuple of (q_new, cost): updated joint angles and optimization cost.
-        """
-        n_hand = self.n_keypoints
-
-        self.hand.forward(q_current)
-        hand_pts = self._get_robot_keypoints()
-
-        if object_pts_world is not None:
-            robot_pts = np.vstack([hand_pts, object_pts_world])
-            source_full = source_pts
-        else:
-            robot_pts = hand_pts
-            source_full = source_pts
-
-        V = len(robot_pts)
-        J_hand = self._get_robot_jacobians()
-        J_V = np.zeros((3 * V, self.nq))
-        J_V[: 3 * n_hand, :] = J_hand
-
-        # T-pose refs
-        robot_T = self._er_robot_tpose
-        human_T = self._er_source_tpose
-
-        edges, residuals, J_edge, w_e = compute_edge_ratio_data(
-            source_full,
-            robot_pts,
-            adj_list,
-            J_V,
-            self.nq,
-            robot_T_positions=robot_T,
-            human_T_positions=human_T,
-            distance_threshold=getattr(self.config, "delaunay_edge_threshold", 0.06) or 0.06,
-            distance_decay_k=getattr(self.config, "laplacian_distance_weight_k", 20.0) or 20.0,
-        )
-        E = len(edges)
-        if E == 0:
-            return q_current.copy(), float("inf")
-
-        # Apply semantic weights (mean of endpoints)
-        if semantic_weights is not None:
-            for k, (i, j) in enumerate(edges):
-                wi = semantic_weights[i] if i < len(semantic_weights) else 1.0
-                wj = semantic_weights[j] if j < len(semantic_weights) else 1.0
-                w_e[k] *= 0.5 * (wi + wj)
-        w_e *= self.laplacian_weight
-        sqrt_w3 = np.sqrt(np.repeat(w_e, 3))
-
-        dq = cp.Variable(self.nq, name="dq")
-        constraints = []
-        if self.config.activate_joint_limits:
-            constraints.append(dq >= self.q_lb - q_current)
-            constraints.append(dq <= self.q_ub - q_current)
-        constraints.append(cp.SOC(self.config.step_size, dq))
-
-        obj_terms = []
-        obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, residuals + cp.Constant(J_edge) @ dq)))
-        dq_smooth = q_prev_frame - q_current
-        obj_terms.append(self.config.smooth_weight * cp.sum_squares(dq - dq_smooth))
-
-        problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
-        problem.solve(solver=cp.CLARABEL, verbose=False)
-
-        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            constraints_no_soc = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
-            problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints_no_soc)
-            problem.solve(solver=cp.CLARABEL, verbose=False)
-
-        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            return q_current.copy(), float("inf")
-
-        q_new = q_current + dq.value
-        q_new = np.clip(q_new, self.q_lb, self.q_ub)
-        return q_new, problem.value
 
     def solve_angle_warmup(
         self,
@@ -740,18 +510,8 @@ class InteractionMeshHandRetargeter:
         Returns:
             (nq,) optimized joint angles.
         """
-        # Augment with probe points if enabled (21 -> 26 landmarks)
-        if self.config.use_orientation_probes and landmarks.shape[0] == 21:
-            landmarks = self._augment_with_probes(landmarks)
-
         # Extract mapped keypoints
         source_pts = self._extract_source_keypoints(landmarks)  # (n_hand, 3)
-
-        # Per-finger bone-ratio scaling (warmup-based)
-        if self.config.use_bone_scaling:
-            # Pass original 21-point landmarks for finger length computation
-            lm_21 = landmarks[:21] if landmarks.shape[0] > 21 else landmarks
-            source_pts = self._apply_bone_scaling(lm_21, source_pts)
 
         # Guard against empty object points
         if object_pts_world is not None and len(object_pts_world) == 0:
@@ -835,90 +595,20 @@ class InteractionMeshHandRetargeter:
         solve_obj_pts = object_pts_local if obj_frame is not None else object_pts_world
         last_cost = float("inf")
 
-        if self.config.use_edge_ratio:
-            # Edge ratio energy (Zhang 2023)
-            if self._er_source_tpose is None:
-                self._er_source_tpose = source_pts_full.copy()
-                self.hand.forward(q_prev)
-                robot_tpose = self._get_robot_keypoints()
-                self._er_robot_tpose = (
-                    np.vstack([robot_tpose, object_pts_world]) if object_pts_world is not None else robot_tpose
-                )
-
-            for _ in range(n_iter):
-                q_current, cost = self.solve_single_iteration_edge_ratio(
-                    q_current,
-                    q_prev,
-                    source_pts_full,
-                    adj_list,
-                    sem_w,
-                    object_pts_world,
-                )
-                if abs(last_cost - cost) < convergence_delta:
-                    break
-                last_cost = cost
-        elif self.config.use_arap_edge:
-            # Two-phase: Laplacian warmup then ARAP edge refinement
-            if is_first_frame:
-                warmup_n = min(ARAP_LAPLACIAN_WARMUP, n_iter // 2)
-                for _ in range(warmup_n):
-                    q_current, cost = self.solve_single_iteration(
-                        q_current,
-                        q_prev,
-                        target_laplacian,
-                        adj_list,
-                        sem_w,
-                        object_pts=object_pts_world,
-                    )
-                    if abs(last_cost - cost) < 1e-8:
-                        break
-                    last_cost = cost
-                last_cost = float("inf")
-                remaining = n_iter - warmup_n
-            else:
-                remaining = n_iter
-
-            for _ in range(remaining):
-                q_current, cost = self.solve_single_iteration_arap(
-                    q_current,
-                    q_prev,
-                    source_pts_full,
-                    adj_list,
-                    sem_w,
-                    object_pts_world,
-                )
-                if abs(last_cost - cost) < 1e-8:
-                    break
-                last_cost = cost
-        else:
-            # Original Laplacian energy (with optional rotation compensation)
-            use_rot_comp = self.config.rotation_compensation
-            target_laplacian_raw = target_laplacian.copy() if use_rot_comp else None
-
-            for _ in range(n_iter):
-                if use_rot_comp:
-                    self.hand.forward(q_current)
-                    robot_pts = self._get_robot_keypoints()
-                    if object_pts_world is not None:
-                        robot_pts_full = np.vstack([robot_pts, object_pts_world])
-                    else:
-                        robot_pts_full = robot_pts
-                    R = estimate_per_vertex_rotations(source_pts_full, robot_pts_full, adj_list)
-                    target_laplacian = np.einsum("vij,vj->vi", R, target_laplacian_raw)
-
-                q_current, cost = self.solve_single_iteration(
-                    q_current,
-                    q_prev,
-                    target_laplacian,
-                    adj_list,
-                    sem_w,
-                    object_pts=solve_obj_pts,
-                    obj_frame=obj_frame,
-                    angle_targets=angle_targets_pair,
-                )
-                if abs(last_cost - cost) < 1e-8:
-                    break
-                last_cost = cost
+        for _ in range(n_iter):
+            q_current, cost = self.solve_single_iteration(
+                q_current,
+                q_prev,
+                target_laplacian,
+                adj_list,
+                sem_w,
+                object_pts=solve_obj_pts,
+                obj_frame=obj_frame,
+                angle_targets=angle_targets_pair,
+            )
+            if abs(last_cost - cost) < convergence_delta:
+                break
+            last_cost = cost
 
         return q_current
 
@@ -1075,146 +765,6 @@ class InteractionMeshHandRetargeter:
     # Private Methods
     # ==========================================================================
 
-    def _compute_robot_segment_lengths(self) -> tuple[np.ndarray, float]:
-        """Compute robot per-segment bone lengths and palm spread at default pose.
-
-        Returns:
-            lengths: (5, 4) per-finger per-segment bone lengths.
-            palm_spread: scalar distance index_MCP -> pinky_MCP.
-        """
-        q0 = self.hand.get_default_qpos()
-        self.hand.forward(q0)
-        n_segs = len(self._finger_segments[0])
-        lengths = np.zeros((5, n_segs))
-        mapping = self.config.joints_mapping
-        for f, segs in enumerate(self._finger_segments):
-            for s, (prox_id, dist_id) in enumerate(segs):
-                prox_pos = self.hand.get_body_pos(mapping[prox_id])
-                dist_pos = self.hand.get_body_pos(mapping[dist_id])
-                lengths[f, s] = np.linalg.norm(dist_pos - prox_pos)
-        index_mcp = self.hand.get_body_pos(mapping[5])
-        pinky_mcp = self.hand.get_body_pos(mapping[17])
-        palm_spread = float(np.linalg.norm(pinky_mcp - index_mcp))
-        return lengths, palm_spread
-
-    def _compute_source_segment_lengths(self, landmarks: np.ndarray) -> np.ndarray:
-        """Compute source per-segment bone lengths.
-
-        Args:
-            landmarks: (21, 3) MediaPipe hand landmarks.
-
-        Returns:
-            (5, 4) array of bone lengths per finger per segment.
-        """
-        n_segs = len(self._finger_segments[0])
-        lengths = np.zeros((5, n_segs))
-        for f, segs in enumerate(self._finger_segments):
-            for s, (prox_id, dist_id) in enumerate(segs):
-                lengths[f, s] = np.linalg.norm(landmarks[dist_id] - landmarks[prox_id])
-        return lengths
-
-    def _apply_bone_scaling(self, landmarks: np.ndarray, source_pts: np.ndarray) -> np.ndarray:
-        """Apply per-segment bone-ratio scaling + palm spread correction to source keypoints.
-
-        Three phases:
-          1. Radial (chain) scaling for wrist->MCP of each finger.
-          2. Palm spread correction: scale lateral spread of non-thumb MCPs
-             (index/middle/ring/pinky) to match robot palm width.
-          3. Radial (chain) scaling for MCP->PIP->DIP->TIP of each finger.
-
-        During warmup (first N frames): collect segment lengths and palm spreads,
-        return unscaled. After warmup: compute ratios, freeze and apply.
-        """
-        scaled = source_pts.copy()
-
-        # --- Phase 1: scale wrist->MCP for all fingers ---
-        for f, segs in enumerate(self._finger_segments):
-            prox_mp, dist_mp = segs[0]
-            prox_mapped = self.mp_indices.index(prox_mp)
-            dist_mapped = self.mp_indices.index(dist_mp)
-            if self._bone_ratios is not None:
-                seg_vec = source_pts[dist_mapped] - source_pts[prox_mapped]
-                scaled[dist_mapped] = scaled[prox_mapped] + self._bone_ratios[f, 0] * seg_vec
-
-        # --- Warmup: collect lengths and palm spread (measured after radial wrist->MCP) ---
-        if self._bone_ratios is None:
-            src_lengths = self._compute_source_segment_lengths(landmarks)
-            self._warmup_seg_lengths.append(src_lengths)
-
-            # Palm spread measured on scaled (post-phase-1) MCPs
-            idx_mapped = self.mp_indices.index(5)
-            pky_mapped = self.mp_indices.index(17)
-            palm_spread = float(np.linalg.norm(scaled[idx_mapped] - scaled[pky_mapped]))
-            self._warmup_palm_spreads.append(palm_spread)
-
-            if len(self._warmup_seg_lengths) < self.config.bone_scaling_warmup:
-                return source_pts  # not enough data yet
-
-            # Compute per-segment ratios from median
-            all_lengths = np.array(self._warmup_seg_lengths)  # (N, 5, 4)
-            median_src = np.median(all_lengths, axis=0)  # (5, 4)
-            self._bone_ratios = self._robot_seg_lengths / (median_src + 1e-8)
-
-            # Palm spread ratio
-            median_palm = float(np.median(self._warmup_palm_spreads))
-            self._palm_spread_ratio = self._robot_palm_spread / (median_palm + 1e-8)
-
-            finger_names = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
-            n_segs = self._bone_ratios.shape[1]
-            seg_names = [f"s{i}" for i in range(n_segs)]
-            for f in range(5):
-                ratios_str = ", ".join(
-                    f"{seg_names[s]}={self._bone_ratios[f, s]:.3f}"
-                    f"({self._robot_seg_lengths[f, s] * 1000:.1f}/{median_src[f, s] * 1000:.1f}mm)"
-                    for s in range(n_segs)
-                )
-                print(f"  Bone ratio {finger_names[f]}: {ratios_str}")
-            print(
-                f"  Palm spread ratio: {self._palm_spread_ratio:.3f}"
-                f" (robot {self._robot_palm_spread * 1000:.1f}mm"
-                f" / source {median_palm * 1000:.1f}mm)"
-            )
-
-            # Re-run phase 1 with fresh ratios on this frame
-            for f, segs in enumerate(self._finger_segments):
-                prox_mp, dist_mp = segs[0]
-                prox_mapped = self.mp_indices.index(prox_mp)
-                dist_mapped = self.mp_indices.index(dist_mp)
-                seg_vec = source_pts[dist_mapped] - source_pts[prox_mapped]
-                scaled[dist_mapped] = scaled[prox_mapped] + self._bone_ratios[f, 0] * seg_vec
-
-        # --- Phase 2: palm spread correction on non-thumb MCPs ---
-        if (
-            self._palm_spread_ratio is not None
-            and abs(self._palm_spread_ratio - 1.0) > 1e-4
-            and self.config.use_palm_spread_scaling
-        ):
-            idx_mapped = self.mp_indices.index(5)
-            pky_mapped = self.mp_indices.index(17)
-            index_pos = scaled[idx_mapped].copy()
-            pinky_pos = scaled[pky_mapped].copy()
-
-            spread_vec = index_pos - pinky_pos
-            spread_len = np.linalg.norm(spread_vec)
-            if spread_len > 1e-8:
-                spread_dir = spread_vec / spread_len
-                spread_center = (index_pos + pinky_pos) * 0.5
-                for mp_idx in self._palm_mcp_mp:
-                    mapped = self.mp_indices.index(mp_idx)
-                    lateral = float(np.dot(scaled[mapped] - spread_center, spread_dir))
-                    scaled[mapped] += (self._palm_spread_ratio - 1.0) * lateral * spread_dir
-
-        # --- Phase 3: scale MCP->PIP->DIP->TIP for each finger ---
-        for f, segs in enumerate(self._finger_segments):
-            for s in range(1, len(segs)):
-                prox_mp, dist_mp = segs[s]
-                prox_mapped = self.mp_indices.index(prox_mp)
-                dist_mapped = self.mp_indices.index(dist_mp)
-                seg_vec = source_pts[dist_mapped] - source_pts[prox_mapped]
-                scaled[dist_mapped] = scaled[prox_mapped] + self._bone_ratios[f, s] * seg_vec
-
-        return scaled
-
     def _align_frame(
         self,
         landmarks_t: np.ndarray,
@@ -1273,23 +823,6 @@ class InteractionMeshHandRetargeter:
             obj *= self.global_scale
 
         return lm, obj
-
-    def _augment_with_probes(self, landmarks: np.ndarray) -> np.ndarray:
-        """Augment (21, 3) MediaPipe landmarks with 5 fingertip direction probe points.
-
-        Each probe point is offset from the fingertip along the DIP->TIP direction,
-        encoding orientation information as a position difference.
-        Returns (26, 3) array: original 21 landmarks + 5 probe points.
-        """
-        tip_dip_pairs = [(4, 3), (8, 7), (12, 11), (16, 15), (20, 19)]
-        probes = np.zeros((5, 3))
-        for i, (tip_id, dip_id) in enumerate(tip_dip_pairs):
-            direction = landmarks[tip_id] - landmarks[dip_id]
-            norm = np.linalg.norm(direction)
-            if norm > 1e-8:
-                direction /= norm
-            probes[i] = landmarks[tip_id] + self.config.probe_offset * direction
-        return np.vstack([landmarks, probes])
 
     def _extract_source_keypoints(self, landmarks: np.ndarray) -> np.ndarray:
         """Extract the mapped keypoints from landmarks array.
