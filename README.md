@@ -1,91 +1,101 @@
-# Dexterous Hand Retargeting
+# 灵巧手运动重定向
 
-Interaction mesh retargeting for WujiHand, ported from OmniRetarget robot_only mode.
+基于交互网格（Interaction Mesh）的手部运动重定向系统，移植自 [OmniRetarget](https://arxiv.org/abs/2501.00000) 并针对灵巧手场景优化。
 
-## Algorithm
+## 算法
 
 ```
-MediaPipe 21 landmarks (human hand)
-  -> coordinate transform (SVD frame + MANO rotation)
-  -> Delaunay tetrahedralization -> adjacency list
-  -> Laplacian coordinates (source target)
-  -> SQP optimization: find robot joint angles that minimize
-     || Laplacian_source - Laplacian_robot ||^2
-     subject to joint limits + trust region
-  -> joint angles (20 DOF)
+MediaPipe 21 点手部关键点（人手）
+  → 坐标变换（SVD 手掌平面估计 + OPERATOR2MANO 旋转对齐）
+  → S1 骨方向余弦 IK（无尺度的方向匹配，daqp QP 求解）
+  → Delaunay 四面体化 → 邻接表 → Laplacian 坐标（目标）
+  → S2 Laplacian 优化：寻找使 ||Laplacian_source - Laplacian_robot||² 最小的关节角
+       + 角度锚定（保护 S1 的方向对齐）
+       + 语义权重（pinch 接近时 boost）
+       + 关节限位 + 信赖域约束
+  → 输出关节角（20 DOF）
 ```
 
-## Structure
+默认 cost 比例：`anchor : laplacian : smooth = 5 : 5 : 1`
+
+## 性能
+
+| 数据集 | 速度 | 说明 |
+|--------|------|------|
+| Manus（手套数据） | 330+ fps | S1+S2 联合优化 |
+| HO-Cap（手物交互） | 160+ fps | S2 Laplacian + 物体点 |
+
+## 目录结构
 
 ```
 retargeting/
-├── src/
-│   ├── hand_retarget/              # Core algorithm
-│   │   ├── retargeter.py           #   InteractionMeshHandRetargeter (SQP solver)
-│   │   ├── mujoco_hand.py          #   Pinocchio FK/Jacobian (uses baseline URDF with tip_link)
-│   │   ├── mesh_utils.py           #   Delaunay + Laplacian functions
-│   │   ├── mediapipe_io.py         #   PKL loading + preprocessing (global scale only)
-│   │   └── config.py               #   Config + 21-point keypoint mapping
-│   └── input_devices/              #   PKL replay module (from wuji_retargeting)
-├── config/
-│   ├── interaction_mesh_left.yaml  #   Interaction mesh config
-│   └── baseline_left.yaml          #   Baseline (wuji_retargeting) config
-├── demos/
-│   ├── hand/
-│   │   ├── run_interaction_mesh.py #   Batch retarget -> results/interaction_mesh/*.npz
-│   │   ├── run_baseline_batch.py   #   Batch baseline -> results/baseline/*.npz
-│   │   ├── play_interaction_mesh.py#   MuJoCo viewer (precompute/live, mesh overlay)
-│   │   ├── play_manus.py          #   Baseline replay viewer
-│   │   ├── play_mesh_only.py      #   Delaunay topology visualization (no robot)
-│   │   ├── play_compare.py        #   Side-by-side baseline vs interaction mesh
-│   │   └── compare.py             #   Numerical comparison (smoothness, limits, tips)
-│   └── humanoid/
-│       └── play_omniretarget_demo.py  # OmniRetarget reference visualization
-├── data/
-│   ├── manus1.pkl                  #   Manus glove trajectory (13341 frames, left hand)
-│   └── cache/                      #   Precomputed retargeting cache
-├── results/
-│   └── interaction_mesh/           #   Retargeting output (.npz)
-├── lib/
-│   └── 25_OmniRetarget/           #   OmniRetarget source (reference only)
-├── doc/
-│   ├── improvement_plan.md         #   Phase 0 + Phase 1 plan
-│   └── omni.md                     #   OmniRetarget codebase notes
-└── wuji_manus_demo/                #   [legacy] standalone baseline demo, data migrated to data/
+├── src/hand_retarget/           # 核心库
+│   ├── retargeter.py            # InteractionMeshHandRetargeter（S1+S2 管线）
+│   ├── mesh_utils.py            # Delaunay、Laplacian、骨架邻接
+│   ├── mujoco_hand.py           # PinocchioHandModel（固定基座 FK/Jacobian）
+│   │                            # MuJoCoFloatingHandModel（浮动基座 + 碰撞）
+│   ├── mediapipe_io.py          # SVD+MANO 预处理、HO-Cap clip 加载
+│   └── config.py                # HandRetargetConfig + 关键点映射
+├── src/scene_builder/           # MuJoCo 场景构建（指尖 site 注入、腕部 6DOF）
+├── assets/                      # 机器人手模型（MuJoCo XML、STL 网格）
+├── config/                      # YAML 配置文件
+├── demos/                       # 可视化脚本
+│   ├── legacy/                  #   Manus 数据回放
+│   ├── hocap/                   #   HO-Cap 手物交互回放
+│   └── shared/                  #   回放工具库
+├── scripts/                     # 批量重定向脚本
+├── tests/                       # pytest 门控测试
+├── experiments/archive/         # 已完成实验归档
+└── doc/                         # 算法笔记、改进计划
 ```
 
-## Usage
+## 快速开始
+
+### 环境
 
 ```bash
-# Batch retarget
-python demos/hand/run_interaction_mesh.py
-
-# Visualize (precompute mode, with cache)
-python demos/hand/play_interaction_mesh.py --speed 0.3
-
-# Live retargeting
-python demos/hand/play_interaction_mesh.py --live --speed 0.3
-
-# Baseline comparison
-python demos/hand/play_manus.py
-
-# Side-by-side comparison
-python demos/hand/play_compare.py
+conda activate mjplgd
+# 可选：设置 wuji_retargeting SDK 路径（不设置时使用默认路径）
+export WUJI_SDK_PATH="/path/to/wuji_retargeting_private/public"
 ```
 
-## Dependencies
+### 运行
 
-- `wuji-retargeting` (pip install -e, preprocessing + baseline)
-- `pinocchio` (conda install -c conda-forge, FK/Jacobian)
-- `cvxpy` + `clarabel` (SOCP solver)
-- `mujoco` (visualization)
-- `scipy` (Delaunay)
+```bash
+# Manus 手套数据可视化
+PYTHONPATH=src python demos/legacy/play_interaction_mesh.py --semantic-weight
 
-## Description Assets
+# HO-Cap 手物交互可视化
+PYTHONPATH=src python demos/hocap/play_hocap.py --clip hocap__subject_3__20231024_161306__seg00
 
-- Retargeting: `wuji_hand_description/urdf/left.urdf` (Pinocchio, has tip_link)
-- Visualization: `urdf_cali/reference/result/xml/left.xml` (MuJoCo, visual only)
+# 运行测试
+PYTHONPATH=src pytest tests/test_gate.py -v
 
-## Status
+# 代码检查和格式化
+ruff check src/ && ruff format src/
+```
 
-See `doc/improvement_plan.md`.
+## 依赖
+
+| 包 | 用途 |
+|----|------|
+| `pinocchio` | 前向运动学 + Jacobian（固定基座模式） |
+| `mujoco` | 可视化 + 浮动基座 FK + 碰撞检测 |
+| `qpsolvers[daqp]` | QP 求解器（替代 CVXPY+Clarabel，10 倍加速） |
+| `scipy` | Delaunay 三角化 + 稀疏矩阵 |
+| `wuji_retargeting` | SVD+MANO 对齐预处理 |
+
+## 模型资源
+
+| 用途 | 路径 |
+|------|------|
+| 重定向 FK | `wuji_hand_description/urdf/left.urdf`（Pinocchio，含 tip_link） |
+| 可视化 | `assets/scenes/single_hand_obj_left.xml`（MuJoCo 场景） |
+| 网格 | `assets/wujihand/meshes/left/`（26 个 STL 文件） |
+
+## 文档
+
+- `doc/improvement_plan.md` — 改进计划与已知问题
+- `doc/exp8_link_midpoint_joint_optimization.md` — EXP-8 连杆中点联合优化实验详情
+- `doc/refactoring_progress.md` — 代码重构进度记录
+- `doc/omni.md` — OmniRetarget 算法移植笔记
