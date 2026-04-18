@@ -412,7 +412,7 @@ def main():
         # Try loading from cache (written by scripts/batch_retarget_hocap.py)
         # Skip old cache when using experimental modes
         use_cache = cache_path is not None and cache_path.exists() and not args.frames
-        if getattr(args, "link_midpoint", False) or getattr(args, "edge_ratio", False) or getattr(args, "angle_warmup", False):
+        if getattr(args, "link_midpoint", False) or getattr(args, "angle_warmup", False):
             use_cache = False
         if use_cache:
             cached = np.load(cache_path, allow_pickle=True)
@@ -436,7 +436,6 @@ def main():
         hand_data[hand_side] = retarget_hand(
             clip, hand_side, scene, args.obj_samples, args.semantic_weight,
             link_midpoint=getattr(args, "link_midpoint", False),
-            edge_ratio=getattr(args, "edge_ratio", False),
             angle_warmup=getattr(args, "angle_warmup", False),
         )
 

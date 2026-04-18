@@ -144,11 +144,7 @@ def build_config_kw(args: argparse.Namespace) -> dict:
         "object_sample_count":         args.obj_samples,
         "delaunay_edge_threshold":     args.threshold,
         "laplacian_distance_weight_k": args.decay_k,
-        "use_arap_edge":               args.arap,
         "use_skeleton_topology":       args.skeleton,
-        "use_bone_scaling":            args.bone_scale,
-        "use_orientation_probes":      args.probes,
-        "rotation_compensation":       args.rotation_comp,
     }
     return kw
 
@@ -182,16 +178,8 @@ def main() -> None:
                         help="Delaunay edge threshold (m). Set to 0 for None (no filter)")
     parser.add_argument("--decay-k", type=float, default=20.0,
                         help="Laplacian distance-decay k. Set to 0 for None (uniform)")
-    parser.add_argument("--arap", action="store_true",
-                        help="Use ARAP per-edge energy")
     parser.add_argument("--skeleton", action="store_true",
                         help="Use skeleton topology")
-    parser.add_argument("--bone-scale", action="store_true",
-                        help="Use per-finger bone-ratio scaling")
-    parser.add_argument("--probes", action="store_true",
-                        help="Use fingertip orientation probes")
-    parser.add_argument("--rotation-comp", action="store_true",
-                        help="Use ARAP rotation compensation")
 
     args = parser.parse_args()
 

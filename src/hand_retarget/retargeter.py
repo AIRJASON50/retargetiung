@@ -6,7 +6,7 @@ Adapted from OmniRetarget for dexterous hands. Supports:
 - object mode: 6DOF wrist + 20 finger = 26 DOF, hand + object surface points
 
 Core algorithm: minimize Laplacian deformation energy subject to joint limits
-and trust region, solved via SQP with CVXPY + Clarabel SOCP solver.
+and trust region, solved via iterative QP with daqp solver.
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ class InteractionMeshHandRetargeter:
         obj_frame: tuple[np.ndarray, np.ndarray] | None = None,
         angle_targets: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> tuple[np.ndarray, float]:
-        """Single SQP iteration: linearize and solve SOCP sub-problem.
+        """Single iteration: linearize Laplacian and solve QP.
 
         Args:
             q_current: (nq,) current joint angles (linearization point).
@@ -863,7 +863,6 @@ class InteractionMeshHandRetargeter:
         """Extract the mapped keypoints from landmarks array.
 
         If link midpoints enabled: returns 20 midpoints from MediaPipe 21 pts.
-        If orientation probes enabled: landmarks should be (26, 3).
         Default: returns landmarks[mp_indices] (21 pts).
         """
         if self.config.use_link_midpoints:

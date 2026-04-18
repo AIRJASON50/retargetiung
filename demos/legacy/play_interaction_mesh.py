@@ -379,8 +379,6 @@ def main():
                 retargeter.hand.forward(qpos)
                 robot_pts = retargeter._get_robot_keypoints() if vis_state["robot"] else np.empty((0, 3))
                 lm_frame = proc_seq[current_idx]
-                if retargeter.config.use_orientation_probes and lm_frame.shape[0] == 21:
-                    lm_frame = retargeter._augment_with_probes(lm_frame)
                 source_pts = retargeter._extract_source_keypoints(lm_frame)
 
                 if vis_state["mesh"]:

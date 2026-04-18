@@ -281,7 +281,6 @@ class HandRetargetConfig:
             parts.append("midpt")
         if self.use_angle_warmup:
             parts.append("aw")
-            parts.append("er")
         if not self.activate_joint_limits:
             parts.append("nojl")
 

@@ -7,8 +7,8 @@ hand_side: left
 optimization:
   step_size: 0.1           # Trust region radius (box constraint)
   smooth_weight: 1.0       # Temporal smoothness (5:5:1 ratio)
-  n_iter_first: 50         # SQP iterations for first frame
-  n_iter: 10               # SQP iterations for subsequent frames
+  n_iter_first: 50         # QP iterations for first frame
+  n_iter: 10               # QP iterations for subsequent frames
   activate_joint_limits: true
 
 angle_warmup:

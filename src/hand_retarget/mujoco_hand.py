@@ -2,7 +2,7 @@
 Hand model wrappers for retargeting FK/Jacobian computation.
 
 Two classes:
-  MuJoCoHandModel -- Pinocchio-based, fixed base, 20 DOF (robot_only mode)
+  PinocchioHandModel -- Pinocchio-based, fixed base, 20 DOF (robot_only mode)
   MuJoCoFloatingHandModel -- MuJoCo-based, 6DOF wrist + 20 finger = 26 DOF (object mode)
 """
 
@@ -74,13 +74,11 @@ class PinocchioHandModel:
     # Dunder Methods
     # ==========================================================================
 
-    def __init__(self, urdf_path: str, probe_offset: float = 0.0) -> None:
+    def __init__(self, urdf_path: str) -> None:
         """Initialize the fixed-base hand model from a URDF.
 
         Args:
             urdf_path: Path to the hand URDF file.
-            probe_offset: If > 0, add virtual probe frames offset from each
-                fingertip along its local z-axis. Set to 0 to disable probes.
         """
         self.model = pin.buildModelFromUrdf(urdf_path)
         self.data = self.model.createData()
@@ -99,8 +97,6 @@ class PinocchioHandModel:
                 self._frame_ids[name] = i
 
         # Add orientation probe frames if requested
-        if probe_offset > 0:
-            self._add_probe_frames(probe_offset)
 
     # ==========================================================================
     # Public Methods
@@ -168,37 +164,6 @@ class PinocchioHandModel:
     # ==========================================================================
     # Private Methods
     # ==========================================================================
-
-    def _add_probe_frames(self, probe_offset: float) -> None:
-        """Add virtual probe frames offset from each tip_link along its local z-axis.
-
-        These frames encode fingertip orientation as position, enabling
-        the Laplacian optimizer to distinguish normal flexion from hyperextension.
-        """
-        side = "left" if "left_palm_link" in self._frame_ids else "right"
-        for f in range(1, NUM_FINGERS + 1):
-            tip_name = f"{side}_finger{f}_tip_link"
-            probe_name = f"{side}_finger{f}_tip_probe"
-            if tip_name not in self._frame_ids:
-                continue
-            tip_fid = self._frame_ids[tip_name]
-            tip_frame = self.model.frames[tip_fid]
-            # Offset along local z-axis of the tip_link frame
-            offset_placement = pin.SE3(np.eye(3), np.array([0.0, 0.0, probe_offset]))
-            probe_placement = tip_frame.placement * offset_placement
-            probe_frame = pin.Frame(
-                probe_name,
-                tip_frame.parentJoint,
-                tip_fid,
-                probe_placement,
-                pin.BODY,
-            )
-            probe_fid = self.model.addFrame(probe_frame)
-            self._frame_ids[probe_name] = probe_fid
-
-        # Rebuild data to account for new frames
-        self.data = self.model.createData()
-
 
 class MuJoCoFloatingHandModel:
     """MuJoCo-based hand model with 6DOF wrist (3 slide + 3 hinge) + 20 finger joints.

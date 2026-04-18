@@ -90,7 +90,7 @@ def verify():
     print(f"  max  abs diff: {max_diff:.2e}")
     print(f"  mean abs diff: {mean_diff:.2e}")
 
-    # Tolerance: SOCP solver is deterministic with same input,
+    # Tolerance: daqp QP solver is deterministic with same input,
     # but float rounding can cause ~1e-10 drift
     tol = 1e-6
     if max_diff < tol:
