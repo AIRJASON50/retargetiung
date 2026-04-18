@@ -64,7 +64,7 @@ class HandModelProtocol(Protocol):
 # ==============================================================================
 
 
-class MuJoCoHandModel:
+class PinocchioHandModel:
     """Pinocchio-based model wrapper for a fixed-base dexterous hand.
 
     Name kept as MuJoCoHandModel for backward compatibility with retargeter.py imports.
@@ -113,7 +113,6 @@ class MuJoCoHandModel:
         pin.updateFramePlacements(self.model, self.data)
         # Also compute joint Jacobians for later use
         pin.computeJointJacobians(self.model, self.data, q)
-        self._last_q = q.copy()
 
     def get_body_id(self, body_name: str) -> int:
         """Get frame id by name."""
@@ -484,3 +483,7 @@ class MuJoCoFloatingHandModel:
             if site_name in self._site_ids:
                 # Register tip_link as a "virtual body" backed by a site
                 self._body_ids[tip_link_name] = -(self._site_ids[site_name] + 1)  # negative = site
+
+
+# Backward compatibility alias
+MuJoCoHandModel = PinocchioHandModel

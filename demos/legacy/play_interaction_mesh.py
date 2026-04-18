@@ -57,7 +57,6 @@ COLOR_ROBOT_NODE = np.array([0.0, 0.9, 0.9, 0.8], dtype=np.float32)   # cyan
 COLOR_EDGE_KEPT = np.array([0.0, 1.0, 0.2, 0.8], dtype=np.float32)    # green: kept (< threshold)
 COLOR_EDGE_LONG = np.array([1.0, 0.2, 0.2, 0.25], dtype=np.float32)   # red translucent: filtered
 COLOR_SOURCE_NODE = np.array([1.0, 0.0, 0.0, 1.0], dtype=np.float32)   # red, opaque
-COLOR_PROBE_SOURCE = np.array([1.0, 0.5, 0.0, 1.0], dtype=np.float32)  # orange, source probe
 COLOR_PROBE_ROBOT = np.array([0.0, 1.0, 0.3, 0.9], dtype=np.float32)   # green, robot probe
 
 SPHERE_SIZE = 0.003   # keypoint sphere radius (m)
@@ -144,18 +143,10 @@ def main():
     parser.add_argument("--no-mesh", action="store_true", help="Hide mesh topology overlay")
     parser.add_argument("--no-source", action="store_true", help="Hide source MediaPipe keypoints")
     parser.add_argument("--live", action="store_true", help="Live retargeting (no precompute, no rewind)")
-    parser.add_argument("--fixed-topology", action="store_true", help="Use fixed topology from first frame (Ho 2010)")
-    parser.add_argument("--distance-weight", action="store_true", help="Use distance-based Laplacian weights (Ho 2010)")
     parser.add_argument("--semantic-weight", action="store_true", help="Use pinch-aware semantic weights on Laplacian loss")
     parser.add_argument("--collision", action="store_true", help="Enable MuJoCo collision detection and contact rendering")
-    parser.add_argument("--probes", action="store_true", help="Enable orientation probe points (26pt instead of 21pt)")
-    parser.add_argument("--bone-scale", action="store_true", help="Enable per-finger bone-ratio auto-scaling")
-    parser.add_argument("--no-palm-spread", action="store_true", help="Disable palm spread correction (radial bone scaling only)")
-    parser.add_argument("--rotation-comp", action="store_true", help="Enable ARAP per-vertex rotation compensation")
-    parser.add_argument("--arap-edge", action="store_true", help="Enable ARAP per-edge energy (replaces Laplacian)")
     parser.add_argument("--skeleton", action="store_true", help="Use hand skeleton topology instead of Delaunay")
     parser.add_argument("--link-midpoint", action="store_true", help="Use 20 link midpoints instead of 21 joint origins")
-    parser.add_argument("--edge-ratio", action="store_true", help="Edge ratio energy (Zhang 2023)")
     parser.add_argument("--angle-warmup", action="store_true", help="Two-stage: angle warmup before Laplacian")
     parser.add_argument("--cache", type=str, default=None, help="Load precomputed cache directly from this .npz path")
     args = parser.parse_args()
@@ -166,22 +157,10 @@ def main():
 
     # Load config with URDF for retargeting (Pinocchio, has tip_link)
     config = HandRetargetConfig.from_yaml(args.config, mjcf_path=args.urdf)
-    if args.probes:
-        config.use_orientation_probes = True
-    if args.bone_scale:
-        config.use_bone_scaling = True
-    if args.no_palm_spread:
-        config.use_palm_spread_scaling = False
-    if args.rotation_comp:
-        config.rotation_compensation = True
-    if args.arap_edge:
-        config.use_arap_edge = True
     if args.skeleton:
         config.use_skeleton_topology = True
     if args.link_midpoint:
         config.use_link_midpoints = True
-    if args.edge_ratio:
-        config.use_edge_ratio = True
     if args.angle_warmup:
         config.use_angle_warmup = True
 
@@ -222,28 +201,12 @@ def main():
     CACHE_DIR = PROJECT_DIR / "data" / "cache"
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_suffix = "im"
-    if args.fixed_topology:
-        cache_suffix += "_fixed"
-    if args.distance_weight:
-        cache_suffix += "_distw"
     if args.semantic_weight:
         cache_suffix += "_semw"
-    if args.probes:
-        cache_suffix += "_probes"
-    if args.bone_scale:
-        cache_suffix += "_bscale"
-        if args.no_palm_spread:
-            cache_suffix += "_nops"
-    if args.rotation_comp:
-        cache_suffix += "_rotcomp"
-    if args.arap_edge:
-        cache_suffix += "_arapedge"
     if args.skeleton:
         cache_suffix += "_skel"
     if args.link_midpoint:
         cache_suffix += "_midpt"
-    if args.edge_ratio:
-        cache_suffix += "_er"
     if args.angle_warmup:
         cache_suffix += "_aw"
     # --cache overrides the auto-derived path
@@ -264,96 +227,22 @@ def main():
 
         if qpos_cache is None:
             import time as _time
-            use_uniform = not args.distance_weight
             parts = []
-            if args.fixed_topology: parts.append("fixed topology")
-            if args.distance_weight: parts.append("distance weight")
             if args.semantic_weight: parts.append("semantic weight")
-            mode_label = " + ".join(parts) if parts else "per-frame Delaunay"
+            mode_label = " + ".join(parts) if parts else "default"
             print(f"No cache found, pre-retargeting {total_frames} frames ({mode_label})...")
             qpos_cache = np.zeros((total_frames, retargeter.nq))
             q_prev = retargeter.hand.get_default_qpos()
             t0 = _time.time()
 
-            if args.fixed_topology:
-                # --- Fixed topology SQP solver (Ho 2010 experiment code) ---
-                from hand_retarget.mesh_utils import calculate_laplacian_coordinates, calculate_laplacian_matrix
-                from scipy import sparse as sp
-                import cvxpy as cp
-
-                source_pts_0 = retargeter._extract_source_keypoints(proc_seq[0])
-                _, simplices = create_interaction_mesh(source_pts_0)
-                fixed_adj = get_adjacency_list(simplices, retargeter.n_keypoints)
-
-                for t in range(total_frames):
-                    source_pts = retargeter._extract_source_keypoints(proc_seq[t])
-                    target_lap = calculate_laplacian_coordinates(source_pts, fixed_adj, uniform_weight=use_uniform)
-
-                    n_iter = 50 if t == 0 else 10
-                    q_current = q_prev.copy()
-                    last_cost = float("inf")
-                    for _ in range(n_iter):
-                        # Custom solve with weight scheme
-                        retargeter.hand.forward(q_current)
-                        robot_pts = retargeter._get_robot_keypoints()
-                        J_V = retargeter._get_robot_jacobians()
-
-                        L = calculate_laplacian_matrix(robot_pts, fixed_adj, uniform_weight=use_uniform)
-                        L_sp = sp.csr_matrix(L)
-                        Kron = sp.kron(L_sp, sp.eye(3, format="csr"), format="csr")
-                        J_L = Kron @ J_V
-
-                        lap0 = L_sp @ robot_pts
-                        lap0_vec = lap0.reshape(-1)
-                        target_lap_vec = target_lap.reshape(-1)
-
-                        V = retargeter.n_keypoints
-                        if args.semantic_weight:
-                            sem_w = retargeter._compute_semantic_weights(source_pts)
-                            w_v = retargeter.laplacian_weight * sem_w
-                        else:
-                            w_v = retargeter.laplacian_weight * np.ones(V)
-                        sqrt_w3 = np.sqrt(np.repeat(w_v, 3))
-
-                        dq = cp.Variable(retargeter.nq, name="dq")
-                        lap_var = cp.Variable(3 * V, name="lap")
-
-                        constraints = [
-                            cp.Constant(J_L) @ dq - lap_var == -lap0_vec,
-                            dq >= retargeter.q_lb - q_current,
-                            dq <= retargeter.q_ub - q_current,
-                            cp.SOC(retargeter.config.step_size, dq),
-                        ]
-                        obj_terms = [
-                            cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)),
-                            retargeter.config.smooth_weight * cp.sum_squares(dq - (q_prev - q_current)),
-                        ]
-                        problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
-                        problem.solve(solver=cp.CLARABEL, verbose=False)
-                        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-                            break
-                        q_current = q_current + dq.value
-                        q_current = np.clip(q_current, retargeter.q_lb, retargeter.q_ub)
-                        if abs(last_cost - problem.value) < 1e-8:
-                            break
-                        last_cost = problem.value
-
-                    qpos_cache[t] = q_current
-                    q_prev = q_current
-                    if (t + 1) % 500 == 0:
-                        fps = (t + 1) / (_time.time() - t0)
-                        print(f"  {t + 1}/{total_frames} ({fps:.0f} fps)")
-                retargeter._adj_list = fixed_adj
-            else:
-                # Per-frame Delaunay (default)
-                for t in range(total_frames):
-                    q_opt = retargeter.retarget_frame(proc_seq[t], q_prev, is_first_frame=(t == 0),
-                                                      use_semantic_weights=args.semantic_weight)
-                    qpos_cache[t] = q_opt
-                    q_prev = q_opt
-                    if (t + 1) % 500 == 0:
-                        fps = (t + 1) / (_time.time() - t0)
-                        print(f"  {t + 1}/{total_frames} ({fps:.0f} fps)")
+            for t in range(total_frames):
+                q_opt = retargeter.retarget_frame(proc_seq[t], q_prev, is_first_frame=(t == 0),
+                                                  use_semantic_weights=args.semantic_weight)
+                qpos_cache[t] = q_opt
+                q_prev = q_opt
+                if (t + 1) % 500 == 0:
+                    fps = (t + 1) / (_time.time() - t0)
+                    print(f"  {t + 1}/{total_frames} ({fps:.0f} fps)")
 
             print(f"Pre-retargeting done in {_time.time() - t0:.1f}s")
             np.savez(cache_path, qpos=qpos_cache)
@@ -566,14 +455,7 @@ def main():
                             size=SPHERE_SIZE * 1.5,
                         )
 
-                    # Draw probe points with distinct colors
-                    if retargeter.config.use_orientation_probes:
-                        if vis_state["source"]:
-                            for pt in source_pts[21:]:
-                                add_sphere(viewer.user_scn, pt, COLOR_PROBE_SOURCE, size=SPHERE_SIZE * 1.5)
-                        if vis_state["robot"]:
-                            for pt in robot_pts[21:]:
-                                add_sphere(viewer.user_scn, pt, COLOR_PROBE_ROBOT, size=SPHERE_SIZE * 1.5)
+
             else:
                 with viewer.lock():
                     viewer.user_scn.ngeom = 0

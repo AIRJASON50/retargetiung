@@ -97,7 +97,7 @@ def detect_handedness(npz_path: str, meta_path: str) -> tuple[list[str], str]:
 
 def retarget_hand(clip: dict, hand_side: str, scene_xml: Path,
                   obj_samples: int, semantic_weight: bool,
-                  link_midpoint: bool = False, edge_ratio: bool = False,
+                  link_midpoint: bool = False,
                   angle_warmup: bool = False) -> dict:
     """Retarget one hand and return qpos + per-frame wrist transforms."""
     config = HandRetargetConfig(
@@ -106,8 +106,6 @@ def retarget_hand(clip: dict, hand_side: str, scene_xml: Path,
     )
     if link_midpoint:
         config.use_link_midpoints = True
-    if edge_ratio:
-        config.use_edge_ratio = True
     if angle_warmup:
         config.use_angle_warmup = True
     retargeter = InteractionMeshHandRetargeter(config)
@@ -304,7 +302,6 @@ def main():
     parser.add_argument("--obj-samples", type=int, default=50)
     parser.add_argument("--semantic-weight", action="store_true")
     parser.add_argument("--link-midpoint", action="store_true", help="Use 20 link midpoints")
-    parser.add_argument("--edge-ratio", action="store_true", help="Edge ratio energy (Zhang 2023)")
     parser.add_argument("--angle-warmup", action="store_true", help="Two-stage: angle warmup before Laplacian")
     parser.add_argument("--frames", type=int, default=None, help="Limit number of frames")
     args = parser.parse_args()

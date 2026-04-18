@@ -1,27 +1,23 @@
 # Interaction Mesh Hand Retargeting Config (LEFT HAND)
-# Algorithm: Laplacian deformation minimization with SOCP constraints
-# Adapted from OmniRetarget robot_only mode for WujiHand
-#
-# Key difference from baseline:
-#   - No per-segment scaling (Laplacian + FK handles proportion differences)
-#   - Single global scale auto-computed from robot hand geometry
-#   - Matches OmniRetarget's smpl_scale approach
+# Algorithm: S1 cosine IK + S2 Laplacian deformation (daqp QP solver)
+# Default ratio: anchor:laplacian:smooth = 5:5:1
 
 hand_side: left
 
 optimization:
-  step_size: 0.1           # Trust region radius (SOC constraint)
-  smooth_weight: 0.2       # Temporal smoothness weight (matches OmniRetarget default)
+  step_size: 0.1           # Trust region radius (box constraint)
+  smooth_weight: 1.0       # Temporal smoothness (5:5:1 ratio)
   n_iter_first: 50         # SQP iterations for first frame
   n_iter: 10               # SQP iterations for subsequent frames
   activate_joint_limits: true
-  activate_self_collision: false
+
+angle_warmup:
+  enabled: true
+  weight: 5.0              # S1 bone direction alignment weight
+  iters: 3                 # S1 iterations per frame
+  anchor_weight: 5.0       # Angle anchor in joint cost
 
 retarget:
-  # Global scale: auto-computed if not set (robot_palm_to_mid_tip / human_palm_to_mid_tip)
-  # global_scale: 0.5  # uncomment to override auto-compute
-
-  # MediaPipe rotation adjustment (degrees)
   mediapipe_rotation:
     x: 0.0
     y: 0.0

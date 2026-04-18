@@ -224,5 +224,3 @@ def get_edge_list(adj_list: list[list[int]]) -> np.ndarray:
         for j in nbrs:
             edges.add((min(i, j), max(i, j)))
     return np.array(sorted(edges), dtype=np.intp)
-
-

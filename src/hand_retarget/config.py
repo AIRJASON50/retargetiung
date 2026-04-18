@@ -172,10 +172,6 @@ class HandRetargetConfig:
     # Object interaction
     object_sample_count: int = 100  # surface points sampled from object mesh
 
-
-
-
-
     # Delaunay edge threshold: filter long-range edges before Laplacian computation.
     # Removes cross-finger connections that pollute neighborhood averages.
     # Default 0.06m (60mm) keeps bone edges and close cross-finger edges only.

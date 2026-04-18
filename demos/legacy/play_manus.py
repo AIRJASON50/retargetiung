@@ -32,7 +32,7 @@ from demos.shared.cache import load_or_compute  # noqa: E402
 from demos.shared.overlay import KEY_DOWN, KEY_UP, add_sphere, set_geom_alpha  # noqa: E402
 from demos.shared.playback import PlaybackController  # noqa: E402
 
-DEFAULT_PKL = PROJECT_DIR / "data" / "manus1_5k.pkl"
+DEFAULT_PKL = PROJECT_DIR / "data" / "manus_for_pinch" / "manus1_5k.pkl"
 DEFAULT_CONFIG = WUJI_DEMO / "config" / "retarget_manus_left.yaml"
 DEFAULT_MJCF = Path("/home/l/ws/doc/WujiRepo/urdf_cali/reference/result/xml/left.xml")
 HAND_SIDE = "left"

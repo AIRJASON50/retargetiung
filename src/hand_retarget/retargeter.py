@@ -34,7 +34,7 @@ from .mesh_utils import (
     get_midpoint_skeleton_adjacency,
     get_skeleton_adjacency,
 )
-from .mujoco_hand import MuJoCoHandModel
+from .mujoco_hand import PinocchioHandModel
 
 # ==============================================================================
 # Constants
@@ -101,7 +101,7 @@ class InteractionMeshHandRetargeter:
 
             self.hand = MuJoCoFloatingHandModel(config.mjcf_path, config.hand_side)
         else:
-            self.hand = MuJoCoHandModel(config.mjcf_path)
+            self.hand = PinocchioHandModel(config.mjcf_path)
 
         # Keypoint mapping: sorted by MediaPipe index
         self.mp_indices = sorted(config.joints_mapping.keys())
@@ -117,7 +117,7 @@ class InteractionMeshHandRetargeter:
 
         # Global scale: WujiHand is human-scale, no scaling needed (unlike OmniRetarget's humanoid)
         # Config allows override if ever needed for a differently-sized hand
-        self.global_scale = self.config.global_scale if self.config.global_scale is not None else 1.0
+        self.global_scale = self.config.global_scale
 
         self._pinch_d_min = PINCH_DISTANCE_MIN
         self._pinch_d_max = PINCH_DISTANCE_MAX
@@ -129,7 +129,6 @@ class InteractionMeshHandRetargeter:
 
         # Cached topology per frame (rebuilt each frame from source points)
         self._adj_list: list[list[int]] | None = None
-
 
         # OPERATOR2MANO: fixed rotation from MediaPipe wrist convention -> robot palm convention
         if config.hand_side == "left":
@@ -163,8 +162,6 @@ class InteractionMeshHandRetargeter:
                         mp_idx = starts[finger_idx] + k
                         if mp_idx in self.mp_indices:
                             self._excluded_finger_kp_indices.append(self.mp_indices.index(mp_idx))
-
-        # Edge ratio: T-pose refs (computed on first frame)
 
         # Angle warmup: cache T-pose body points at default pose
         if config.use_angle_warmup:
@@ -329,6 +326,7 @@ class InteractionMeshHandRetargeter:
         q_current: np.ndarray,
         q_prev: np.ndarray,
         landmarks_21: np.ndarray,
+        n_iters: int | None = None,
     ) -> np.ndarray:
         """Stage 1: GMR-style bone direction alignment using IK.
 
@@ -358,7 +356,8 @@ class InteractionMeshHandRetargeter:
         w_tip = 100.0  # strong anchor on fingertips
         eps = 1e-8
 
-        for _ in range(self.config.angle_warmup_iters):
+        iters = n_iters if n_iters is not None else self.config.angle_warmup_iters
+        for _ in range(iters):
             self.hand.forward(q_current)
 
             residuals = []
@@ -459,15 +458,12 @@ class InteractionMeshHandRetargeter:
         Returns:
             Tuple of (target_q, confidence): target joint angles and per-joint confidence.
         """
-        old_iters = self.config.angle_warmup_iters
-        self.config.angle_warmup_iters = 1
         q_target = q_current.copy()
         for _ in range(3):
             q_before = q_target.copy()
-            q_target = self.solve_angle_warmup(q_target, q_prev, landmarks_21)
+            q_target = self.solve_angle_warmup(q_target, q_prev, landmarks_21, n_iters=1)
             if np.linalg.norm(q_target - q_before) < 1e-3:
                 break
-        self.config.angle_warmup_iters = old_iters
 
         confidence = np.ones(self.nq)
         if self.config.floating_base and self.nq > 20:
@@ -509,15 +505,44 @@ class InteractionMeshHandRetargeter:
         Returns:
             (nq,) optimized joint angles.
         """
-        # Extract mapped keypoints
-        source_pts = self._extract_source_keypoints(landmarks)  # (n_hand, 3)
+        source_pts = self._extract_source_keypoints(landmarks)
+        source_pts_full, adj_list, target_lap = self._build_topology(
+            source_pts,
+            object_pts_world,
+            obj_frame,
+            object_pts_local,
+        )
+        sem_w = self._compute_weights(source_pts, object_pts_world, use_semantic_weights)
+        return self._run_optimization(
+            q_prev,
+            landmarks,
+            source_pts_full,
+            adj_list,
+            target_lap,
+            sem_w,
+            object_pts_world,
+            obj_frame,
+            object_pts_local,
+            is_first_frame,
+        )
 
-        # Guard against empty object points
+    def _build_topology(
+        self,
+        source_pts: np.ndarray,
+        object_pts_world: np.ndarray | None = None,
+        obj_frame: tuple[np.ndarray, np.ndarray] | None = None,
+        object_pts_local: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, list[list[int]], np.ndarray]:
+        """Build interaction mesh topology and compute target Laplacian.
+
+        Returns:
+            source_pts_full: Combined hand + object points.
+            adj_list: Adjacency list from Delaunay/skeleton.
+            target_laplacian: Target Laplacian coordinates.
+        """
         if object_pts_world is not None and len(object_pts_world) == 0:
             object_pts_world = None
 
-        # Combine hand + object points for mesh construction
-        # When obj_frame is set, transform source points to object-local frame
         if obj_frame is not None and object_pts_local is not None:
             R_inv, t_obj = obj_frame
             source_pts_obj = (source_pts - t_obj) @ R_inv.T
@@ -529,76 +554,87 @@ class InteractionMeshHandRetargeter:
 
         V = len(source_pts_full)
 
-        # Build topology
         if self.config.use_link_midpoints and self.config.use_skeleton_topology:
             adj_list = get_midpoint_skeleton_adjacency(self.n_keypoints)
             if V > self.n_keypoints:
                 adj_list = adj_list + [[] for _ in range(V - self.n_keypoints)]
         elif self.config.use_skeleton_topology:
-            # Hand skeleton: per-finger chains, no cross-finger connections
             adj_list = get_skeleton_adjacency(self.n_keypoints)
             if V > self.n_keypoints:
                 adj_list = adj_list + [[] for _ in range(V - self.n_keypoints)]
         else:
-            # Delaunay tetrahedralization (default)
             _, simplices = create_interaction_mesh(source_pts_full)
             adj_list = get_adjacency_list(simplices, V)
             if self.config.delaunay_edge_threshold is not None:
-                adj_list = filter_adjacency_by_distance(adj_list, source_pts_full, self.config.delaunay_edge_threshold)
+                adj_list = filter_adjacency_by_distance(
+                    adj_list,
+                    source_pts_full,
+                    self.config.delaunay_edge_threshold,
+                )
         self._adj_list = adj_list
 
-        # Compute target Laplacian from combined source
-        target_laplacian = calculate_laplacian_coordinates(
+        target_lap = calculate_laplacian_coordinates(
             source_pts_full,
             adj_list,
             distance_decay_k=self.config.laplacian_distance_weight_k,
         )
+        return source_pts_full, adj_list, target_lap
 
-        # Semantic weights (on full vertex set)
-        if use_semantic_weights:
-            sem_w_hand = self._compute_semantic_weights(source_pts)
-            if object_pts_world is not None:
-                # Object points get base weight (no semantic boost)
-                sem_w = np.concatenate([sem_w_hand, np.ones(len(object_pts_world))])
-            else:
-                sem_w = sem_w_hand
-        else:
-            sem_w = None
+    def _compute_weights(
+        self,
+        source_pts: np.ndarray,
+        object_pts_world: np.ndarray | None,
+        use_semantic: bool,
+    ) -> np.ndarray | None:
+        """Compute per-vertex semantic weights for Laplacian cost."""
+        if not use_semantic:
+            return None
+        sem_w = self._compute_semantic_weights(source_pts)
+        if object_pts_world is not None:
+            sem_w = np.concatenate([sem_w, np.ones(len(object_pts_world))])
+        return sem_w
 
-        # SQP iterations with convergence-based dispatch
+    def _run_optimization(
+        self,
+        q_prev: np.ndarray,
+        landmarks: np.ndarray,
+        source_pts_full: np.ndarray,
+        adj_list: list[list[int]],
+        target_lap: np.ndarray,
+        sem_w: np.ndarray | None,
+        object_pts_world: np.ndarray | None = None,
+        obj_frame: tuple[np.ndarray, np.ndarray] | None = None,
+        object_pts_local: np.ndarray | None = None,
+        is_first_frame: bool = False,
+    ) -> np.ndarray:
+        """Run S1 angle warmup + S2 Laplacian convergence loop."""
         n_iter = self.config.n_iter_first if is_first_frame else self.config.n_iter
         q_current = q_prev.copy()
-        last_cost = float("inf")
         convergence_delta = 1e-3
 
-        # Stage 1: cosine IK bone direction alignment (convergence-based, max 5 iter)
+        # Stage 1: cosine IK bone direction alignment
         if self.config.use_angle_warmup:
             lm_21 = landmarks[:21] if landmarks.shape[0] > 21 else landmarks
-            old_iters = self.config.angle_warmup_iters
-            self.config.angle_warmup_iters = 1
             for _ in range(5):
                 q_before = q_current.copy()
-                q_current = self.solve_angle_warmup(q_current, q_prev, lm_21)
-                delta = np.linalg.norm(q_current - q_before)
-                if delta < convergence_delta:
+                q_current = self.solve_angle_warmup(q_current, q_prev, lm_21, n_iters=1)
+                if np.linalg.norm(q_current - q_before) < convergence_delta:
                     break
-            self.config.angle_warmup_iters = old_iters
 
-        # Compute angle targets for joint cost (from S1 or fresh extraction)
+        # Compute angle targets for joint cost
         angle_targets_pair = None
         if self.config.use_angle_warmup and self.config.angle_anchor_weight > 0:
             lm_21 = landmarks[:21] if landmarks.shape[0] > 21 else landmarks
             angle_targets_pair = self._extract_cosik_targets(q_current, q_prev, lm_21)
 
-        # Stage 2: position refinement (convergence-based)
+        # Stage 2: Laplacian position refinement
         solve_obj_pts = object_pts_local if obj_frame is not None else object_pts_world
         last_cost = float("inf")
-
         for _ in range(n_iter):
             q_current, cost = self.solve_single_iteration(
                 q_current,
                 q_prev,
-                target_laplacian,
+                target_lap,
                 adj_list,
                 sem_w,
                 object_pts=solve_obj_pts,
