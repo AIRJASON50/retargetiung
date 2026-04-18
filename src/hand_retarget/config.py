@@ -73,24 +73,6 @@ JOINTS_MAPPING_RIGHT = {
 }
 """MediaPipe index -> WujiHand MuJoCo body name (right hand)."""
 
-_PROBE_MAPPING_LEFT = {
-    21: "left_finger1_tip_probe",
-    22: "left_finger2_tip_probe",
-    23: "left_finger3_tip_probe",
-    24: "left_finger4_tip_probe",
-    25: "left_finger5_tip_probe",
-}
-"""Virtual indices 21-25 for fingertip orientation probes (left hand)."""
-
-_PROBE_MAPPING_RIGHT = {
-    21: "right_finger1_tip_probe",
-    22: "right_finger2_tip_probe",
-    23: "right_finger3_tip_probe",
-    24: "right_finger4_tip_probe",
-    25: "right_finger5_tip_probe",
-}
-"""Virtual indices 21-25 for fingertip orientation probes (right hand)."""
-
 # Link-midpoint keypoint definition: 20 points (4 per finger, wrist excluded).
 # Each entry: (mp_parent, mp_child) for midpoint, or (mp_tip, None) for raw TIP.
 MIDPOINT_SEGMENTS: list[tuple[int, int | None]] = [
@@ -148,14 +130,10 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("optimization", "n_iter_first"): "n_iter_first",
     ("optimization", "n_iter"): "n_iter",
     ("optimization", "activate_joint_limits"): "activate_joint_limits",
-    ("optimization", "activate_self_collision"): "activate_self_collision",
     ("optimization", "floating_base"): "floating_base",
     ("optimization", "object_sample_count"): "object_sample_count",
-    ("optimization", "rotation_compensation"): "rotation_compensation",
     ("retarget", "global_scale"): "global_scale",
     ("retarget", "mediapipe_rotation"): "mediapipe_rotation",
-    ("orientation_probes", "offset"): "probe_offset",
-    ("bone_scaling", "warmup"): "bone_scaling_warmup",
     ("", "hand_side"): "hand_side",
     ("angle_warmup", "weight"): "angle_warmup_weight",
     ("angle_warmup", "iters"): "angle_warmup_iters",
@@ -164,11 +142,8 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
 """Maps ``(yaml_section, yaml_key)`` to ``HandRetargetConfig`` field name."""
 
 _YAML_ENABLED_MAP: dict[str, str] = {
-    "orientation_probes": "use_orientation_probes",
-    "bone_scaling": "use_bone_scaling",
     "link_midpoints": "use_link_midpoints",
     "angle_warmup": "use_angle_warmup",
-    "edge_ratio": "use_edge_ratio",
 }
 """Maps YAML section name to the boolean field toggled by its ``enabled`` key."""
 
@@ -192,26 +167,14 @@ class HandRetargetConfig:
     n_iter_first: int = 50  # SQP iterations for first frame
     n_iter: int = 10  # SQP iterations for subsequent frames
     activate_joint_limits: bool = True
-    activate_self_collision: bool = False  # TODO: wire up to solver when self-collision constraint is implemented
     activate_non_penetration: bool = False  # fingertip-object non-penetration (linearized SDF)
 
     # Object interaction
     object_sample_count: int = 100  # surface points sampled from object mesh
 
-    # Orientation probes
-    use_orientation_probes: bool = False  # Add 5 fingertip direction probe points (21->26)
-    probe_offset: float = 0.005  # Probe offset distance in meters (5mm)
 
-    # Per-finger bone-ratio auto-scaling
-    use_bone_scaling: bool = False  # Auto per-finger bone-ratio scaling (warmup-based)
-    bone_scaling_warmup: int = 10  # Frames to collect before computing ratios
-    use_palm_spread_scaling: bool = True  # Include cross-finger MCP spread correction (Phase 2)
 
-    # ARAP per-vertex rotation compensation for Laplacian targets
-    rotation_compensation: bool = False
 
-    # ARAP per-edge energy: replace Laplacian cost with per-edge deformation energy
-    use_arap_edge: bool = False
 
     # Delaunay edge threshold: filter long-range edges before Laplacian computation.
     # Removes cross-finger connections that pollute neighborhood averages.
@@ -241,14 +204,11 @@ class HandRetargetConfig:
     smooth_weight: float = 1.0  # Temporal smoothness (5:5:1 ratio with anchor and laplacian)
     exclude_fingers_from_laplacian: list = None  # Finger indices (0-4) excluded from Laplacian gradient
 
-    # Edge ratio energy (Zhang 2023): replace Laplacian with per-edge ratio cost
-    use_edge_ratio: bool = False
-
     # Object-frame Laplacian: compute Laplacian in object local coordinates
     use_object_frame: bool = False
 
     # MediaPipe preprocessing
-    global_scale: float | None = None
+    global_scale: float = 1.0
     use_mano_rotation: bool = True  # True: SVD+OPERATOR2MANO (manus data), False: wrist-center only (HO-Cap)
     mediapipe_rotation: dict = field(
         default_factory=lambda: {
@@ -260,18 +220,8 @@ class HandRetargetConfig:
 
     @property
     def joints_mapping(self) -> dict[int, str]:
-        """Return the joint mapping for the configured hand side, optionally including probes."""
-        base = JOINTS_MAPPING_LEFT if self.hand_side == "left" else JOINTS_MAPPING_RIGHT
-        if self.use_orientation_probes:
-            probes = _PROBE_MAPPING_LEFT if self.hand_side == "left" else _PROBE_MAPPING_RIGHT
-            return {**base, **probes}
-        return base
-
-    @property
-    def fingertip_links(self) -> list[str]:
-        """Fingertip link names for the configured hand side (currently unused, kept for future use)."""
-        side = self.hand_side
-        return [f"{side}_finger{i}_tip_link" for i in range(1, 6)]
+        """MediaPipe index -> robot body name mapping."""
+        return JOINTS_MAPPING_LEFT if self.hand_side == "left" else JOINTS_MAPPING_RIGHT
 
     @classmethod
     def from_yaml(cls, yaml_path: str, mjcf_path: str = "") -> HandRetargetConfig:
@@ -329,21 +279,12 @@ class HandRetargetConfig:
 
         parts.append(f"s{self.object_sample_count}")
 
-        if self.use_arap_edge:
-            parts.append("arap")
         if self.use_skeleton_topology:
             parts.append("skel")
-        if self.use_bone_scaling:
-            parts.append("bsc")
-        if self.use_orientation_probes:
-            parts.append("prb")
-        if self.rotation_compensation:
-            parts.append("rc")
         if self.use_link_midpoints:
             parts.append("midpt")
         if self.use_angle_warmup:
             parts.append("aw")
-        if self.use_edge_ratio:
             parts.append("er")
         if not self.activate_joint_limits:
             parts.append("nojl")

@@ -247,7 +247,6 @@ class InteractionMeshHandRetargeter:
         L = calculate_laplacian_matrix(
             robot_pts,
             adj_list,
-            uniform_weight=True,
             distance_decay_k=self.config.laplacian_distance_weight_k,
         )
         L_sp = sp.csr_matrix(L)
