@@ -11,7 +11,6 @@ and trust region, solved via SQP with CVXPY + Clarabel SOCP solver.
 
 from __future__ import annotations
 
-import cvxpy as cp
 import numpy as np
 import qpsolvers
 from scipy import sparse as sp
@@ -29,10 +28,7 @@ from .mediapipe_io import load_pkl_sequence
 from .mesh_utils import (
     calculate_laplacian_coordinates,
     calculate_laplacian_matrix,
-    compute_arap_edge_data,
-    compute_edge_ratio_data,
     create_interaction_mesh,
-    estimate_per_vertex_rotations,
     filter_adjacency_by_distance,
     get_adjacency_list,
     get_midpoint_skeleton_adjacency,

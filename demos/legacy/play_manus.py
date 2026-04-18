@@ -25,7 +25,7 @@ WUJI_DEMO = SCRIPT_DIR / "wuji_manus_demo"
 
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 sys.path.insert(0, str(PROJECT_DIR))
-sys.path.insert(0, "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public")
+import os; _WUJI_SDK = os.environ.get("WUJI_SDK_PATH", "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public"); sys.path.insert(0, _WUJI_SDK)
 from hand_retarget.mediapipe_io import preprocess_landmarks  # noqa: E402
 
 from demos.shared.cache import load_or_compute  # noqa: E402

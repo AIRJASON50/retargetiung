@@ -18,13 +18,13 @@ import numpy as np
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
-sys.path.insert(0, "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public")
+import os; _WUJI_SDK = os.environ.get("WUJI_SDK_PATH", "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public"); sys.path.insert(0, _WUJI_SDK)
 
 from hand_retarget import HandRetargetConfig, InteractionMeshHandRetargeter
 from hand_retarget.mediapipe_io import load_pkl_sequence, preprocess_sequence
 
 URDF = Path(
-    "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public/"
+    _WUJI_SDK
     "wuji_retargeting/wuji_hand_description/urdf/left.urdf"
 )
 PKL = PROJECT_DIR / "data" / "manus_for_pinch" / "manus1_5k.pkl"

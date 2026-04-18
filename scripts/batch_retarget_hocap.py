@@ -22,7 +22,7 @@ from scipy.spatial.transform import Rotation as RotLib
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 sys.path.insert(0, str(PROJECT_DIR))
-sys.path.insert(0, "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public")
+import os; _WUJI_SDK = os.environ.get("WUJI_SDK_PATH", "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public"); sys.path.insert(0, _WUJI_SDK)
 
 from hand_retarget import InteractionMeshHandRetargeter, HandRetargetConfig  # noqa: E402
 from hand_retarget.mediapipe_io import load_hocap_clip  # noqa: E402

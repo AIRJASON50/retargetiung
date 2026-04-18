@@ -30,7 +30,7 @@ PROJECT_DIR = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 sys.path.insert(0, str(PROJECT_DIR))
 # editable install fallback: wuji_retargeting source
-sys.path.insert(0, "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public")
+import os; _WUJI_SDK = os.environ.get("WUJI_SDK_PATH", "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public"); sys.path.insert(0, _WUJI_SDK)
 
 from hand_retarget import InteractionMeshHandRetargeter, HandRetargetConfig  # noqa: E402
 from hand_retarget.mediapipe_io import load_pkl_sequence  # noqa: E402
@@ -49,7 +49,7 @@ from demos.shared.playback import PlaybackController  # noqa: E402
 DEFAULT_PKL = PROJECT_DIR / "data" / "manus_for_pinch" / "manus1_5k.pkl"
 DEFAULT_CONFIG = PROJECT_DIR / "config" / "interaction_mesh_left.yaml"
 DEFAULT_MJCF = Path("/home/l/ws/doc/WujiRepo/urdf_cali/reference/result/xml/left.xml")  # MuJoCo XML for visualization
-DEFAULT_URDF = Path("/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public/wuji_retargeting/wuji_hand_description/urdf/left.urdf")  # Pinocchio URDF for retargeting (has tip_link)
+DEFAULT_URDF = Path(_WUJI_SDK) / "wuji_retargeting" / "wuji_hand_description" / "urdf" / "left.urdf"  # Pinocchio URDF for retargeting (has tip_link)
 HAND_SIDE = "left"
 
 # Visualization colors [R, G, B, A] as float32
