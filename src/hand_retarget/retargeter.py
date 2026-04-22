@@ -283,6 +283,15 @@ class InteractionMeshHandRetargeter:
             w_v = self.laplacian_weight * np.ones(V)
         sqrt_w3 = np.sqrt(np.repeat(w_v, 3))
 
+        # Optional: normalize Laplacian residual + Jacobian by a characteristic
+        # length, turning the IM cost into a dimensionless quantity so that
+        # laplacian_weight / anchor_weight / smooth_weight are pure relative
+        # importance ratios. Default None = legacy behavior (raw meters).
+        # Typical values: ~0.03 m (avg bone length) or ~0.08 m (palm-tip dist).
+        L_char = self.config.interaction_mesh_length_scale
+        if L_char is not None and L_char > 0:
+            sqrt_w3 = sqrt_w3 / float(L_char)
+
         # Eliminate lap_var via equality constraint:
         # lap_var = J_L @ dq + lap0_vec
         # Cost becomes: ||sqrt_w * (J_L @ dq + lap0 - target_lap)||^2
@@ -1044,14 +1053,18 @@ class InteractionMeshHandRetargeter:
             mesh_path = clip.get("mesh_path")
             if mesh_path:
                 self.hand.inject_object_mesh(mesh_path, self.config.hand_side)
-                # Update limits after model rebuild
+                # Update limits after model rebuild. Re-apply the SAME 6-DOF
+                # wrist lock used in the non-inject path above (translation
+                # 0:3 AND rotation 3:6). The previous [:3] slice was a typo —
+                # leaving wrist rotation unlocked made C mode diverge from D
+                # by up to 32° even on frames with zero penetration.
                 self.q_lb = self.hand.q_lb
                 self.q_ub = self.hand.q_ub
                 saved_q_lb = self.q_lb.copy()
                 saved_q_ub = self.q_ub.copy()
                 if self.config.floating_base and self.nq > 20:
-                    self.q_lb[:3] = 0.0
-                    self.q_ub[:3] = 0.0
+                    self.q_lb[:6] = 0.0
+                    self.q_ub[:6] = 0.0
 
         if np_any and getattr(self.hand, "_has_object", False):
             from wuji_retargeting.mediapipe import estimate_frame_from_hand_points  # noqa: PLC0415

@@ -1,15 +1,15 @@
 [
   {
     "clip": "hocap__subject_1__20231025_165502__seg00",
-    "D": {
+    "D-IMx1111": {
       "clip": "hocap__subject_1__20231025_165502__seg00",
-      "mode": "D",
+      "mode": "D-IMx1111",
       "hands": [
         "left"
       ],
       "T": 166,
-      "wall_s": 0.8274168130010366,
-      "fps": 200.62439799587688,
+      "wall_s": 2.2063328090589494,
+      "fps": 75.23796923040035,
       "pen_max_mm": 0.0,
       "pen_mean_mm": 0.0,
       "pen_p95_mm": 0.0,
@@ -19,198 +19,96 @@
       "warmup_stall_total": 0,
       "s2_stall_total": 0,
       "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_1__20231025_165502__seg00__np-D.npz"
+      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_1__20231025_165502__seg00__np-D-IMx1111.npz"
     },
-    "A": {
+    "A-IMx1111": {
       "clip": "hocap__subject_1__20231025_165502__seg00",
-      "mode": "A",
+      "mode": "A-IMx1111",
       "hands": [
         "left"
       ],
       "T": 166,
-      "wall_s": 1.1680773840053007,
-      "fps": 142.1138721398673,
-      "pen_max_mm": 50.12965943994573,
-      "pen_mean_mm": 31.20675139698908,
-      "pen_p95_mm": 49.03812490079604,
-      "frames_with_pen": 120,
-      "warmup_shrink_total": 452,
+      "wall_s": 1.814095493988134,
+      "fps": 91.5056569789847,
+      "pen_max_mm": 54.05193778083211,
+      "pen_mean_mm": 31.20191160933933,
+      "pen_p95_mm": 53.6960371505619,
+      "frames_with_pen": 118,
+      "warmup_shrink_total": 456,
       "s2_shrink_total": 0,
-      "warmup_stall_total": 113,
+      "warmup_stall_total": 114,
       "s2_stall_total": 0,
       "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_1__20231025_165502__seg00__np-A.npz",
+      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_1__20231025_165502__seg00__np-A-IMx1111.npz",
       "qpos_vs_D": {
-        "qpos_max_abs_deg": 16.785245253885442,
-        "qpos_rms_deg": 3.4994164049956966,
-        "qpos_mean_abs_deg": 2.334035126307167
+        "qpos_max_abs_deg": 0.12856273700149506,
+        "qpos_rms_deg": 0.014111505040986872,
+        "qpos_mean_abs_deg": 0.00511477343321353
       }
     },
-    "B": {
+    "B-IMx1111": {
       "clip": "hocap__subject_1__20231025_165502__seg00",
-      "mode": "B",
+      "mode": "B-IMx1111",
       "hands": [
         "left"
       ],
       "T": 166,
-      "wall_s": 1.0442064109956846,
-      "fps": 158.97240071693645,
-      "pen_max_mm": 50.13783896297619,
-      "pen_mean_mm": 30.550593264781206,
-      "pen_p95_mm": 49.04574789704898,
-      "frames_with_pen": 120,
+      "wall_s": 1.2872859119670466,
+      "fps": 128.95348147354653,
+      "pen_max_mm": 50.19419957348799,
+      "pen_mean_mm": 30.90920640723154,
+      "pen_p95_mm": 49.06761850385472,
+      "frames_with_pen": 118,
       "warmup_shrink_total": 0,
-      "s2_shrink_total": 448,
+      "s2_shrink_total": 464,
       "warmup_stall_total": 0,
-      "s2_stall_total": 112,
+      "s2_stall_total": 116,
       "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_1__20231025_165502__seg00__np-B.npz",
+      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_1__20231025_165502__seg00__np-B-IMx1111.npz",
       "qpos_vs_D": {
-        "qpos_max_abs_deg": 20.816663472628036,
-        "qpos_rms_deg": 3.546507256525302,
-        "qpos_mean_abs_deg": 2.355918609123798
+        "qpos_max_abs_deg": 50.014183337439555,
+        "qpos_rms_deg": 9.566061273047126,
+        "qpos_mean_abs_deg": 4.939091812779375
       }
     },
-    "C": {
+    "C-IMx1111": {
       "clip": "hocap__subject_1__20231025_165502__seg00",
-      "mode": "C",
+      "mode": "C-IMx1111",
       "hands": [
         "left"
       ],
       "T": 166,
-      "wall_s": 0.9871673859888688,
-      "fps": 168.1579054941264,
-      "pen_max_mm": 34.25047838452866,
-      "pen_mean_mm": 15.402763359457351,
-      "pen_p95_mm": 33.26731403879228,
-      "frames_with_pen": 120,
-      "warmup_shrink_total": 412,
-      "s2_shrink_total": 412,
-      "warmup_stall_total": 103,
-      "s2_stall_total": 103,
+      "wall_s": 1.39440814696718,
+      "fps": 119.04692350015874,
+      "pen_max_mm": 39.0400235572382,
+      "pen_mean_mm": 19.571081858661003,
+      "pen_p95_mm": 38.177366278213256,
+      "frames_with_pen": 118,
+      "warmup_shrink_total": 428,
+      "s2_shrink_total": 428,
+      "warmup_stall_total": 107,
+      "s2_stall_total": 107,
       "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_1__20231025_165502__seg00__np-C.npz",
+      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_1__20231025_165502__seg00__np-C-IMx1111.npz",
       "qpos_vs_D": {
-        "qpos_max_abs_deg": 48.074383227065766,
-        "qpos_rms_deg": 12.327075627786336,
-        "qpos_mean_abs_deg": 7.371207413997869
-      }
-    }
-  },
-  {
-    "clip": "hocap__subject_3__20231024_161306__seg00",
-    "D": {
-      "clip": "hocap__subject_3__20231024_161306__seg00",
-      "mode": "D",
-      "hands": [
-        "left",
-        "right"
-      ],
-      "T": 594,
-      "wall_s": 2.69769785401877,
-      "fps": 220.1877423430189,
-      "pen_max_mm": 0.0,
-      "pen_mean_mm": 0.0,
-      "pen_p95_mm": 0.0,
-      "frames_with_pen": 0,
-      "warmup_shrink_total": 0,
-      "s2_shrink_total": 0,
-      "warmup_stall_total": 0,
-      "s2_stall_total": 0,
-      "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_161306__seg00__np-D.npz"
-    },
-    "A": {
-      "clip": "hocap__subject_3__20231024_161306__seg00",
-      "mode": "A",
-      "hands": [
-        "left",
-        "right"
-      ],
-      "T": 594,
-      "wall_s": 4.392260605003685,
-      "fps": 135.2378771248938,
-      "pen_max_mm": 26.58581907265702,
-      "pen_mean_mm": 8.219179194107348,
-      "pen_p95_mm": 23.914674567006237,
-      "frames_with_pen": 254,
-      "warmup_shrink_total": 352,
-      "s2_shrink_total": 0,
-      "warmup_stall_total": 88,
-      "s2_stall_total": 0,
-      "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_161306__seg00__np-A.npz",
-      "qpos_vs_D": {
-        "qpos_max_abs_deg": 32.11072232712924,
-        "qpos_rms_deg": 9.481121562071388,
-        "qpos_mean_abs_deg": 6.221543883656258
-      }
-    },
-    "B": {
-      "clip": "hocap__subject_3__20231024_161306__seg00",
-      "mode": "B",
-      "hands": [
-        "left",
-        "right"
-      ],
-      "T": 594,
-      "wall_s": 4.563017861917615,
-      "fps": 130.17700521346868,
-      "pen_max_mm": 26.585895031632155,
-      "pen_mean_mm": 3.2818724237192485,
-      "pen_p95_mm": 23.516219797271464,
-      "frames_with_pen": 254,
-      "warmup_shrink_total": 0,
-      "s2_shrink_total": 316,
-      "warmup_stall_total": 0,
-      "s2_stall_total": 79,
-      "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_161306__seg00__np-B.npz",
-      "qpos_vs_D": {
-        "qpos_max_abs_deg": 31.595857351114624,
-        "qpos_rms_deg": 9.227778527266738,
-        "qpos_mean_abs_deg": 6.178234576642181
-      }
-    },
-    "C": {
-      "clip": "hocap__subject_3__20231024_161306__seg00",
-      "mode": "C",
-      "hands": [
-        "left",
-        "right"
-      ],
-      "T": 594,
-      "wall_s": 3.9123013330390677,
-      "fps": 151.82879574835357,
-      "pen_max_mm": 1.2547286007307292,
-      "pen_mean_mm": 0.4282386664741208,
-      "pen_p95_mm": 1.0000085917960932,
-      "frames_with_pen": 254,
-      "warmup_shrink_total": 0,
-      "s2_shrink_total": 0,
-      "warmup_stall_total": 0,
-      "s2_stall_total": 0,
-      "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_161306__seg00__np-C.npz",
-      "qpos_vs_D": {
-        "qpos_max_abs_deg": 30.405433332506153,
-        "qpos_rms_deg": 9.120947281103529,
-        "qpos_mean_abs_deg": 6.154273890207841
+        "qpos_max_abs_deg": 42.29696749221237,
+        "qpos_rms_deg": 12.893755996675182,
+        "qpos_mean_abs_deg": 7.041216684724076
       }
     }
   },
   {
     "clip": "hocap__subject_3__20231024_162409__seg00",
-    "D": {
+    "D-IMx1111": {
       "clip": "hocap__subject_3__20231024_162409__seg00",
-      "mode": "D",
+      "mode": "D-IMx1111",
       "hands": [
         "left",
         "right"
       ],
       "T": 494,
-      "wall_s": 2.2698940120171756,
-      "fps": 217.63130674149824,
+      "wall_s": 6.080991239985451,
+      "fps": 81.2367557367476,
       "pen_max_mm": 0.0,
       "pen_mean_mm": 0.0,
       "pen_p95_mm": 0.0,
@@ -220,84 +118,84 @@
       "warmup_stall_total": 0,
       "s2_stall_total": 0,
       "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_162409__seg00__np-D.npz"
+      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_162409__seg00__np-D-IMx1111.npz"
     },
-    "A": {
+    "A-IMx1111": {
       "clip": "hocap__subject_3__20231024_162409__seg00",
-      "mode": "A",
+      "mode": "A-IMx1111",
       "hands": [
         "left",
         "right"
       ],
       "T": 494,
-      "wall_s": 2.9725911238929257,
-      "fps": 166.18498118673457,
-      "pen_max_mm": 46.62205517733479,
-      "pen_mean_mm": 15.280277508271034,
-      "pen_p95_mm": 44.31236266568656,
-      "frames_with_pen": 200,
-      "warmup_shrink_total": 720,
+      "wall_s": 5.483013445045799,
+      "fps": 90.09644148262228,
+      "pen_max_mm": 44.200500850653675,
+      "pen_mean_mm": 13.117874787203615,
+      "pen_p95_mm": 38.31029485642001,
+      "frames_with_pen": 197,
+      "warmup_shrink_total": 760,
       "s2_shrink_total": 0,
-      "warmup_stall_total": 180,
+      "warmup_stall_total": 190,
       "s2_stall_total": 0,
       "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_162409__seg00__np-A.npz",
+      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_162409__seg00__np-A-IMx1111.npz",
       "qpos_vs_D": {
-        "qpos_max_abs_deg": 31.425912532523334,
-        "qpos_rms_deg": 8.936591045672452,
-        "qpos_mean_abs_deg": 5.769797632392613
+        "qpos_max_abs_deg": 0.22953119325685545,
+        "qpos_rms_deg": 0.017023237060916713,
+        "qpos_mean_abs_deg": 0.0043267245911437135
       }
     },
-    "B": {
+    "B-IMx1111": {
       "clip": "hocap__subject_3__20231024_162409__seg00",
-      "mode": "B",
+      "mode": "B-IMx1111",
       "hands": [
         "left",
         "right"
       ],
       "T": 494,
-      "wall_s": 2.7324395960895345,
-      "fps": 180.79082176490792,
-      "pen_max_mm": 46.75101322134748,
-      "pen_mean_mm": 14.653245615895186,
-      "pen_p95_mm": 44.351175499716575,
-      "frames_with_pen": 200,
+      "wall_s": 4.698640453978442,
+      "fps": 105.13679538550761,
+      "pen_max_mm": 48.220057295305104,
+      "pen_mean_mm": 13.94930546639967,
+      "pen_p95_mm": 44.57852383604807,
+      "frames_with_pen": 197,
       "warmup_shrink_total": 0,
-      "s2_shrink_total": 716,
+      "s2_shrink_total": 752,
       "warmup_stall_total": 0,
-      "s2_stall_total": 179,
+      "s2_stall_total": 188,
       "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_162409__seg00__np-B.npz",
+      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_162409__seg00__np-B-IMx1111.npz",
       "qpos_vs_D": {
-        "qpos_max_abs_deg": 31.497612837242546,
-        "qpos_rms_deg": 8.902474090826752,
-        "qpos_mean_abs_deg": 5.741082325003014
+        "qpos_max_abs_deg": 44.9699925563094,
+        "qpos_rms_deg": 8.072724496553123,
+        "qpos_mean_abs_deg": 3.630622424370234
       }
     },
-    "C": {
+    "C-IMx1111": {
       "clip": "hocap__subject_3__20231024_162409__seg00",
-      "mode": "C",
+      "mode": "C-IMx1111",
       "hands": [
         "left",
         "right"
       ],
       "T": 494,
-      "wall_s": 3.0221652060281485,
-      "fps": 163.45896611298585,
-      "pen_max_mm": 14.635455397299433,
-      "pen_mean_mm": 1.6080250112485475,
-      "pen_p95_mm": 10.494189831648711,
-      "frames_with_pen": 200,
-      "warmup_shrink_total": 268,
-      "s2_shrink_total": 268,
-      "warmup_stall_total": 67,
-      "s2_stall_total": 67,
+      "wall_s": 6.268017847905867,
+      "fps": 78.81279409008775,
+      "pen_max_mm": 31.44488838177494,
+      "pen_mean_mm": 4.724160098634225,
+      "pen_p95_mm": 28.974813251643607,
+      "frames_with_pen": 197,
+      "warmup_shrink_total": 367,
+      "s2_shrink_total": 364,
+      "warmup_stall_total": 91,
+      "s2_stall_total": 91,
       "struct_infeas_count": 0,
-      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_162409__seg00__np-C.npz",
+      "cache_path": "/home/l/ws/RL/retargeting/.worktrees/exp-penetration-constraint/data/cache/hocap/hocap__subject_3__20231024_162409__seg00__np-C-IMx1111.npz",
       "qpos_vs_D": {
-        "qpos_max_abs_deg": 38.46524436502958,
-        "qpos_rms_deg": 9.055582916995235,
-        "qpos_mean_abs_deg": 5.926433542844283
+        "qpos_max_abs_deg": 70.93680507568362,
+        "qpos_rms_deg": 12.704372441759626,
+        "qpos_mean_abs_deg": 5.154505933273596
       }
     }
   }

@@ -296,14 +296,22 @@ class MuJoCoFloatingHandModel:
         """
         import mujoco as mj
 
+        # Must apply the SAME injection set as load_scene_model uses in __init__
+        # (fingertip sites + wrist_frame + wrist6dof), otherwise the rebuilt
+        # model loses palm_frame_body / palm_frame markers and ngeom / nsite /
+        # nbody indices shift slightly → retargeter produces subtly different
+        # qpos even on frames with no contact. See EXP-13 REPORT for the
+        # divergence trace.
         from scene_builder.hand_builder import (
             _inject_fingertip_sites,
             _inject_wrist6dof_mode,
+            _inject_wrist_frame,
         )
 
         scene_xml = self._scene_xml
         spec = mj.MjSpec.from_file(scene_xml)
         _inject_fingertip_sites(spec, hand_side)
+        _inject_wrist_frame(spec, hand_side)
         _inject_wrist6dof_mode(spec)
 
         # Enable hand collision geoms

@@ -168,6 +168,7 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("", "hand_side"): "hand_side",
     ("", "delaunay_edge_threshold"): "delaunay_edge_threshold",
     ("", "laplacian_distance_weight_k"): "laplacian_distance_weight_k",
+    ("", "interaction_mesh_length_scale"): "interaction_mesh_length_scale",
     ("angle_warmup", "weight"): "angle_warmup_weight",
     ("angle_warmup", "iters"): "angle_warmup_iters",
     ("angle_warmup", "iters_first"): "angle_warmup_iters_first",
@@ -207,10 +208,13 @@ class HandRetargetConfig:
     activate_joint_limits: bool = True
 
     # Non-penetration (hand geoms × object) hard constraints, linearized SQP.
-    # Independent flags per stage so ablations can test where the constraint
-    # contributes. Both False = legacy behavior (no penetration avoidance).
-    activate_non_penetration_warmup: bool = False
-    activate_non_penetration_s2: bool = False
+    # On HO-Cap: activate in BOTH stages (pipeline invariant) per EXP-13.
+    # Per-stage flags retained so ablations can disable selectively.
+    # On Manus / any model without ``query_hand_penetration`` on the hand
+    # wrapper (e.g. PinocchioHandModel): these flags are no-ops — the
+    # constraint builder returns (None, None) without an object mesh.
+    activate_non_penetration_warmup: bool = True
+    activate_non_penetration_s2: bool = True
     # SQP tolerance (meters) on linearized inequality: J_contact · dq ≥ -phi - tol.
     # Pure slack for numerical convergence, unrelated to any geometric bias --
     # hand collision capsules already carry their own radius via mj_geomDistance.
@@ -237,6 +241,19 @@ class HandRetargetConfig:
     # k=20.0 means an edge at 50mm gets weight ~0.37 relative to a 0mm edge.
     # Set to None to use uniform weights (original behavior).
     laplacian_distance_weight_k: float | None = 20.0
+
+    # Characteristic length (meters) for normalizing the IM cost: when set,
+    # the Laplacian residual (meters) is divided by L_char, making the IM
+    # term dimensionless. This removes the unit mismatch between IM (m²),
+    # anchor (dimensionless), and smooth (rad²), so laplacian_weight becomes
+    # a pure "relative importance" knob.
+    #   * None (default): legacy behavior — raw meters, weight 5.0 empirically
+    #     tuned for hand scale.
+    #   * 0.03 m:  avg finger bone length.
+    #   * 0.08 m:  palm-to-tip reference length.
+    # If you switch this ON, re-tune laplacian_weight (likely smaller since
+    # residual magnitudes grow by 1/L_char²).
+    interaction_mesh_length_scale: float | None = None
 
     # Skeleton topology: use hand bone structure instead of Delaunay
     use_skeleton_topology: bool = False

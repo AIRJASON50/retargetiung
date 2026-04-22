@@ -90,7 +90,8 @@ def detect_hands(clip_id: str) -> list[str]:
 
 
 def run_one(clip_id: str, mode_tag: str, warmup_flag: bool, s2_flag: bool,
-            n_frames: int | None) -> dict:
+            n_frames: int | None, im_scale: float | None = None,
+            lap_weight: float | None = None) -> dict:
     hands = detect_hands(clip_id)
     if not hands:
         raise RuntimeError(f"No hands detected for {clip_id}")
@@ -104,14 +105,23 @@ def run_one(clip_id: str, mode_tag: str, warmup_flag: bool, s2_flag: bool,
     wall_total = 0.0
 
     for hand_side in hands:
+        overrides: dict = {
+            "activate_non_penetration_warmup": warmup_flag,
+            "activate_non_penetration_s2":     s2_flag,
+        }
+        if im_scale is not None:
+            overrides["interaction_mesh_length_scale"] = im_scale
         cfg = HandRetargetConfig.from_yaml(
             str(HOCAP_YAML),
             mjcf_path=SCENE[hand_side],
             hand_side=hand_side,
-            activate_non_penetration_warmup=warmup_flag,
-            activate_non_penetration_s2=s2_flag,
+            **overrides,
         )
         r = InteractionMeshHandRetargeter(cfg)
+        # Allow overriding the hard-coded retargeter.laplacian_weight from CLI
+        # so we can sweep weight × scale without editing source.
+        if lap_weight is not None:
+            r.laplacian_weight = float(lap_weight)
 
         clip = load_hocap_clip(
             str(npz), str(meta), str(HOCAP_DIR / "assets"),
@@ -217,6 +227,16 @@ def main():
     parser.add_argument("--quick", action="store_true", help="100f × 1 clip")
     parser.add_argument("--clips", type=str, default=None, help="Comma-separated clip IDs")
     parser.add_argument("--frames", type=int, default=None)
+    parser.add_argument("--im-scale", type=float, default=None,
+                        help="Normalize IM residual by this length (m). "
+                             "Default None = legacy raw-meters behavior.")
+    parser.add_argument("--lap-weight", type=float, default=None,
+                        help="Override retargeter.laplacian_weight (default 5.0). "
+                             "Use together with --im-scale to re-balance.")
+    parser.add_argument("--tag-suffix", type=str, default="",
+                        help="Append to mode tag in cache filename, e.g. 'L003' "
+                             "→ caches are named np-D-L003 / np-C-L003 so they "
+                             "don't overwrite the baseline np-D / np-C caches.")
     args = parser.parse_args()
 
     if args.quick:
@@ -228,16 +248,30 @@ def main():
     print(f"Modes: {[m[0] for m in MODES]}")
     print(f"Clips: {clips}")
     print(f"Frames: {args.frames or 'all'}")
+    if args.im_scale is not None:
+        print(f"IM length scale: {args.im_scale} m  (effective IM weight ×{1/args.im_scale**2:.1f})")
+    if args.lap_weight is not None:
+        print(f"Overriding laplacian_weight = {args.lap_weight}")
+    if args.tag_suffix:
+        print(f"Cache tag suffix: -{args.tag_suffix}")
     print("=" * 60)
 
     all_results: list[dict] = []
     per_clip_summary: list[dict] = []
 
+    # If a suffix is requested, append to mode tag so cache filenames become
+    # e.g. np-D-L003 / np-C-L003 and don't stomp the baseline caches.
+    modes_with_suffix = [
+        ((f"{t}-{args.tag_suffix}" if args.tag_suffix else t), w, s)
+        for t, w, s in MODES
+    ]
+
     for clip in clips:
         print(f"\n>>> CLIP {clip}")
         clip_results: dict[str, dict] = {}
-        for tag, w, s in MODES:
-            r = run_one(clip, tag, w, s, args.frames)
+        for tag, w, s in modes_with_suffix:
+            r = run_one(clip, tag, w, s, args.frames,
+                        im_scale=args.im_scale, lap_weight=args.lap_weight)
             clip_results[tag] = r
             all_results.append(r)
             print(f"  [{tag}] T={r['T']:3d} fps={r['fps']:6.1f}  "
@@ -245,13 +279,15 @@ def main():
                   f"np≥0.5mm={r['frames_with_pen']:3d}  "
                   f"w_sh={r['warmup_shrink_total']:3d} s_sh={r['s2_shrink_total']:3d} "
                   f"struct={r['struct_infeas_count']}")
-        # qpos diffs vs D baseline
-        for tag in ["A", "B", "C"]:
-            clip_results[tag]["qpos_vs_D"] = compare_qpos(clip_results["D"], clip_results[tag])
+        # qpos diffs vs D baseline — use the (possibly-suffixed) tag names
+        all_tags = [t for (t, _, _) in modes_with_suffix]
+        d_tag = all_tags[0]  # first is always D-variant
+        for tag in all_tags[1:]:
+            clip_results[tag]["qpos_vs_D"] = compare_qpos(clip_results[d_tag], clip_results[tag])
         per_clip_summary.append({
             "clip": clip,
             **{tag: {k: v for k, v in clip_results[tag].items() if k != "qpos"}
-               for tag in ["D", "A", "B", "C"]},
+               for tag in all_tags},
         })
 
     # Write report
@@ -265,9 +301,12 @@ def main():
     )
     for s in per_clip_summary:
         short = s["clip"].split("__")[1] + "/" + s["clip"].split("__")[-1]
-        for tag in ["D", "A", "B", "C"]:
+        # Iterate tags actually present in this summary (respects --tag-suffix)
+        tag_keys = [k for k in s.keys() if k != "clip"]
+        d_tag = tag_keys[0]
+        for tag in tag_keys:
             rr = s[tag]
-            dq = rr.get("qpos_vs_D", {}).get("qpos_rms_deg", 0.0) if tag != "D" else 0.0
+            dq = rr.get("qpos_vs_D", {}).get("qpos_rms_deg", 0.0) if tag != d_tag else 0.0
             lines.append(
                 f"| {short} | {tag} | {rr['T']} | {rr['fps']:.1f} | "
                 f"{rr['pen_max_mm']:.2f} | {rr['pen_mean_mm']:.2f} | {rr['pen_p95_mm']:.2f} | "
