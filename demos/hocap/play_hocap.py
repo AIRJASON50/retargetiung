@@ -309,7 +309,22 @@ def main():
     parser.add_argument("--link-midpoint", action="store_true", help="Use 20 link midpoints")
     parser.add_argument("--angle-warmup", action="store_true", help="Two-stage: angle warmup before Laplacian")
     parser.add_argument("--frames", type=int, default=None, help="Limit number of frames")
+    parser.add_argument("--np-mode", choices=["off", "warmup", "s2", "both"], default=None,
+                        help="Non-penetration constraint scope; also picks cache stamped np-D/A/B/C. "
+                             "Shorthand for --cache <...__np-X.npz> when exp_penetration_ablation caches exist.")
     args = parser.parse_args()
+
+    # --np-mode shorthand: pick the matching cache stamp produced by
+    # experiments/exp_penetration_ablation.py
+    if args.np_mode and args.cache is None:
+        np_tag = {"off": "D", "warmup": "A", "s2": "B", "both": "C"}[args.np_mode]
+        candidate = (PROJECT_DIR / "data" / "cache" / "hocap"
+                     / f"{args.clip}__np-{np_tag}.npz")
+        if candidate.exists():
+            args.cache = str(candidate)
+            print(f"--np-mode {args.np_mode} -> cache {candidate.name}")
+        else:
+            print(f"WARNING: --np-mode {args.np_mode} requested but cache not found: {candidate}")
 
     # Resolve paths -- support numeric ID (e.g. "42") or full clip_id
     clip_id = args.clip

@@ -325,25 +325,17 @@ class InteractionMeshHandRetargeter:
             lb = np.maximum(lb, self.q_lb - q_current)
             ub = np.minimum(ub, self.q_ub - q_current)
 
-        # Non-penetration: linear inequality constraints G @ dq <= h
-        G_rows = []
-        h_vals = []
-        if self.config.activate_non_penetration and hasattr(self.hand, "query_tip_penetration"):
-            for J_contact, phi, _ in self.hand.query_tip_penetration(threshold=PENETRATION_QUERY_THRESHOLD):
-                # J_contact @ dq >= -phi - capsule_radius  →  -J_contact @ dq <= phi + capsule_radius
-                G_rows.append(-J_contact.reshape(1, -1))
-                h_vals.append(phi + CAPSULE_RADIUS)
+        # Non-penetration: linear inequality constraints G @ dq <= h (S2 scope)
+        G, h = self._build_penetration_constraints(
+            q_current, active=self.config.activate_non_penetration_s2
+        )
 
-        G = np.vstack(G_rows) if G_rows else None
-        h = np.array(h_vals) if h_vals else None
-
-        problem = qpsolvers.Problem(H, c, G=G, h=h, lb=lb, ub=ub)
-        solution = qpsolvers.solve_problem(problem, solver="daqp")
-
-        if not solution.found:
+        dq_val, n_shrinks, found = self._solve_qp_trust_shrink(H, c, G, h, lb, ub)
+        self._s2_shrinks_this_frame += n_shrinks
+        if not found:
+            self._s2_stall_iters += 1
             return q_current.copy(), float("inf")
 
-        dq_val = solution.x
         q_new = q_current + dq_val
         q_new = np.clip(q_new, self.q_lb, self.q_ub)
 
@@ -444,12 +436,22 @@ class InteractionMeshHandRetargeter:
             lb = np.maximum(self.q_lb - q_current, -self.config.step_size)
             ub = np.minimum(self.q_ub - q_current, self.config.step_size)
 
-            problem = qpsolvers.Problem(H, c, lb=lb, ub=ub)
-            solution = qpsolvers.solve_problem(problem, solver="daqp")
+            # Non-penetration hard constraint (warmup scope, pipeline invariant
+            # when enabled). Linearized at current q, re-queried every iter.
+            G, h = self._build_penetration_constraints(
+                q_current, active=self.config.activate_non_penetration_warmup
+            )
 
-            if solution.found:
-                q_current = q_current + solution.x
-                q_current = np.clip(q_current, self.q_lb, self.q_ub)
+            dq, n_shrinks, found = self._solve_qp_trust_shrink(H, c, G, h, lb, ub)
+            self._warmup_shrinks_this_frame += n_shrinks
+            if not found:
+                # Trust-region shrink exhausted: this iter is structurally
+                # infeasible. Stall (q unchanged), exit warmup to let S2 try
+                # with a clean cost set.
+                self._warmup_stall_iters += 1
+                break
+
+            q_current = np.clip(q_current + dq, self.q_lb, self.q_ub)
 
         return q_current
 
@@ -745,6 +747,95 @@ class InteractionMeshHandRetargeter:
             sem_w = np.concatenate([sem_w, np.ones(len(object_pts_world))])
         return sem_w
 
+    def _build_penetration_constraints(
+        self, q: np.ndarray, active: bool,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Linearize non-penetration at ``q`` into QP inequality rows.
+
+        Each hand-geom × object pair within ``PENETRATION_QUERY_THRESHOLD``
+        becomes one row of ``G @ dq <= h`` where:
+
+            h_row =  phi + penetration_tolerance          (meters)
+            G_row = -J_contact                             (1, nq)
+
+        Equivalent to ``J_contact · dq >= -phi - tol`` — "the separation
+        velocity along the contact normal must be at least large enough to
+        clear (or stay clear of) penetration by ``tol`` meters within one
+        linearized step". Matches OmniRetarget's
+        ``_update_jacobians_and_phis_from_q`` + constraint assembly.
+
+        Returns ``(None, None)`` when:
+          * feature disabled (``active=False``),
+          * no object is injected in the hand model,
+          * no hand-object pairs are within the query threshold.
+
+        Args:
+            q: Current joint configuration. ``self.hand.forward(q)`` is
+                invoked inside to refresh kinematics.
+            active: Whether the caller (warmup / S2) wants the constraint
+                this iteration. When ``False`` this function returns early.
+
+        Returns:
+            (G, h) arrays or (None, None) if there are no active rows.
+        """
+        if not active:
+            return None, None
+        if not hasattr(self.hand, "query_hand_penetration"):
+            return None, None
+        if not getattr(self.hand, "_has_object", False):
+            return None, None
+
+        self.hand.forward(q)
+        rows = self.hand.query_hand_penetration(threshold=PENETRATION_QUERY_THRESHOLD)
+        if not rows:
+            return None, None
+
+        tol = self.config.penetration_tolerance
+        G = np.vstack([(-r[0]).reshape(1, -1) for r in rows])
+        h = np.array([r[1] + tol for r in rows])
+        return G, h
+
+    def _solve_qp_trust_shrink(
+        self,
+        H: np.ndarray,
+        c: np.ndarray,
+        G: np.ndarray | None,
+        h: np.ndarray | None,
+        lb: np.ndarray,
+        ub: np.ndarray,
+    ) -> tuple[np.ndarray, int, bool]:
+        """Solve a QP with progressive trust-region halving on infeasibility.
+
+        Standard SQP practice: when the linearized QP is infeasible at the
+        current q, it often means the trust-region box is asking for a bigger
+        step than the active constraint set allows. Halving the box may
+        recover a feasible small step; repeat up to
+        ``config.penetration_max_trust_shrinks`` times.
+
+        If all shrinks fail, the iteration is structurally infeasible
+        (cost gradient and constraint set have no compatible direction in
+        any sub-trust-region). Caller should stall and log.
+
+        This is strictly preferable to either "stall at infeasibility"
+        (loses progress) or "drop the hard constraint and redo"
+        (breaks the invariant), both of which were considered earlier.
+
+        Returns:
+            (dq, n_shrinks, found) — dq has shape (nq,); zero-filled when
+            not found. ``n_shrinks`` counts halvings actually used (0 on
+            first-try success).
+        """
+        lb_s, ub_s = lb.copy(), ub.copy()
+        max_shrinks = self.config.penetration_max_trust_shrinks
+        for k in range(max_shrinks + 1):
+            problem = qpsolvers.Problem(H, c, G=G, h=h, lb=lb_s, ub=ub_s)
+            sol = qpsolvers.solve_problem(problem, solver="daqp")
+            if sol.found:
+                return sol.x, k, True
+            lb_s *= 0.5
+            ub_s *= 0.5
+        return np.zeros_like(lb), max_shrinks + 1, False
+
     def _run_optimization(
         self,
         q_prev: np.ndarray,
@@ -773,6 +864,15 @@ class InteractionMeshHandRetargeter:
         q_current = q_prev.copy()
         warmup_conv = self.config.warmup_convergence_delta
         s2_conv = self.config.s2_convergence_delta
+
+        # Per-frame non-penetration telemetry counters (reset each frame).
+        # Populated by solve_angle_warmup / solve_single_iteration via their
+        # trust-shrink helper. Consumer: driver scripts pull these into
+        # per-frame metrics dict for the ablation report.
+        self._warmup_shrinks_this_frame = 0
+        self._warmup_stall_iters = 0
+        self._s2_shrinks_this_frame = 0
+        self._s2_stall_iters = 0
 
         # Stage 1: cosine IK bone direction alignment
         if self.config.use_angle_warmup:
@@ -819,6 +919,26 @@ class InteractionMeshHandRetargeter:
             )
             if np.linalg.norm(q_current - q_before) < s2_conv:
                 break
+
+        # Final residual penetration (post-SQP). Computed regardless of whether
+        # constraints were enabled so ablation can compare D (no constraint)
+        # against A/B/C. Populated onto self._frame_np_metrics for driver.
+        final_pen_max = 0.0
+        if hasattr(self.hand, "query_hand_penetration") and getattr(self.hand, "_has_object", False):
+            self.hand.forward(q_current)
+            pen = [-phi for _, phi, _, _ in self.hand.query_hand_penetration(
+                threshold=PENETRATION_QUERY_THRESHOLD
+            ) if phi < 0]
+            final_pen_max = max(pen) if pen else 0.0
+
+        self._frame_np_metrics = {
+            "warmup_shrinks": self._warmup_shrinks_this_frame,
+            "warmup_stalls":  self._warmup_stall_iters,
+            "s2_shrinks":     self._s2_shrinks_this_frame,
+            "s2_stalls":      self._s2_stall_iters,
+            "final_pen_max_mm": float(final_pen_max * 1000.0),
+            "struct_infeas":  (self._warmup_stall_iters + self._s2_stall_iters) > 5,
+        }
 
         return q_current
 
@@ -911,8 +1031,16 @@ class InteractionMeshHandRetargeter:
         # self.config.n_iter_first directly.
         self.config.n_iter_first = HOCAP_N_ITER_FIRST
 
-        # Inject object mesh for non-penetration constraint
-        if self.config.activate_non_penetration and hasattr(self.hand, "inject_object_mesh"):
+        # Inject object mesh only when at least one stage actually needs the
+        # hard-constraint path. Injecting unconditionally rebuilds the MuJoCo
+        # model (spec.compile()) and subtly changes retargeting behavior even
+        # in D baseline -- observed as visual wrist misalignment on HO-Cap
+        # clips that work correctly on main. Keep the gate here to preserve
+        # D-mode parity with main; D-mode pen_max telemetry will therefore
+        # report 0 (no object injected to measure against).
+        np_any = (self.config.activate_non_penetration_warmup
+                  or self.config.activate_non_penetration_s2)
+        if np_any and hasattr(self.hand, "inject_object_mesh"):
             mesh_path = clip.get("mesh_path")
             if mesh_path:
                 self.hand.inject_object_mesh(mesh_path, self.config.hand_side)
@@ -925,19 +1053,38 @@ class InteractionMeshHandRetargeter:
                     self.q_lb[:3] = 0.0
                     self.q_ub[:3] = 0.0
 
+        if np_any and getattr(self.hand, "_has_object", False):
+            from wuji_retargeting.mediapipe import estimate_frame_from_hand_points  # noqa: PLC0415
+
         try:
             for t in tqdm(range(T), desc="Retargeting (obj mode)"):
                 obj_world = transform_object_points(obj_pts_local, obj_q[t], obj_t[t])
                 # Force SVD alignment (more reliable than wrist_q for HO-Cap data)
                 lm, obj_transformed = self._align_frame(landmarks_raw[t], None, obj_world)
 
-                # Update object pose in retargeter's MuJoCo model (for collision queries)
-                # Object pose must be in the same aligned frame as hand landmarks
-                # SVD alignment is forced (wrist_q=None), so use raw object pose
-                if self.config.activate_non_penetration and self.hand._has_object:
+                # Update object pose in retargeter's MuJoCo model — only when
+                # the hand's object mesh was actually injected (gated above by
+                # np_any). This places the object in the SAME hand-local frame
+                # that play_hocap's viz model reconstructs via R_inv, so the
+                # mj_geomDistance queries here correspond 1:1 to the
+                # penetration the user sees on screen.
+                #
+                # R_align matches play_hocap.retarget_hand's formula:
+                #   R_svd = estimate_frame_from_hand_points(lm_centered)
+                #   R_align = R_svd @ OPERATOR2MANO   (and R_inv = R_align.T)
+                #
+                # Object position: (obj_t - wrist_world) @ R_align  (row-vector form)
+                # Object rotation: R_align.T @ R_obj_world
+                # This is the inverse of qpos_to_world: p_local = (p_world-wrist) @ R_align
+                if np_any and self.hand._has_object:
                     wrist_world = landmarks_raw[t, 0]
-                    obj_center_aligned = obj_t[t] - wrist_world
-                    obj_quat_aligned = obj_q[t]
+                    lm_centered = landmarks_raw[t] - wrist_world
+                    R_svd = estimate_frame_from_hand_points(lm_centered)
+                    R_align = R_svd @ self._R_mano
+                    obj_center_aligned = (obj_t[t] - wrist_world) @ R_align
+                    R_obj_world = RotLib.from_quat(obj_q[t]).as_matrix()
+                    R_obj_aligned = R_align.T @ R_obj_world
+                    obj_quat_aligned = RotLib.from_matrix(R_obj_aligned).as_quat()
                     self.hand.set_object_pose(obj_center_aligned, obj_quat_aligned)
 
                 # Build object-frame transform if enabled

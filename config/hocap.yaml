@@ -14,7 +14,14 @@ optimization:
   activate_joint_limits: true
   floating_base: true              # HO-Cap: 6 DOF wrist (locked to SVD frame) + 20 finger
   object_sample_count: 50          # surface points sampled from the object mesh each clip
-  activate_non_penetration: false  # will flip on in the hard-constraint ablation
+  # Non-penetration (hand × object) hard constraints. EXP-13 validated that
+  # enabling BOTH stages (pipeline-invariant) gives pen_max → tolerance level
+  # on clean clips; enabling only one stage is mostly useless (warmup alone
+  # gets overridden by S2's Laplacian; S2 alone can't escape deep start).
+  activate_non_penetration_warmup: true
+  activate_non_penetration_s2: true
+  penetration_tolerance: 0.001            # 1 mm pure SQP slack
+  penetration_max_trust_shrinks: 3        # halve trust region up to N times on infeasible
   warmup_convergence_delta: 0.001
   s2_convergence_delta: 0.001
   anchor_mode: cosik_live

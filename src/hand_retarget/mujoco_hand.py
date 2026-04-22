@@ -338,7 +338,7 @@ class MuJoCoFloatingHandModel:
         self.q_ub = self.model.jnt_range[:, 1].copy()
         self._rebuild_caches()
 
-        # Cache fingertip collision geom ids (link4_col geoms)
+        # Cache fingertip collision geom ids (link4_col geoms, legacy path)
         self._tip_col_geom_ids = []
         for f in range(1, NUM_FINGERS + 1):
             gname = f"{hand_side}_finger{f}_link4_col"
@@ -346,6 +346,12 @@ class MuJoCoFloatingHandModel:
                 if self.model.geom(i).name == gname:
                     self._tip_col_geom_ids.append(i)
                     break
+
+        # All hand collision geoms (palm + finger capsules) for whole-hand
+        # non-penetration queries. Filter = any geom under the hand body tree
+        # with contype!=0 or conaffinity!=0 (the MuJoCo-native rule for geoms
+        # that participate in collision).
+        self._hand_col_geom_ids = self._collect_hand_col_geoms(hand_side)
 
         # Object geom id
         self._obj_geom_id = self.model.geom("retarget_obj_geom").id
@@ -414,9 +420,136 @@ class MuJoCoFloatingHandModel:
 
         return results
 
+    def query_hand_penetration(
+        self, threshold: float = 0.05
+    ) -> list[tuple[np.ndarray, float, int, int]]:
+        """Signed distance + contact-normal projected Jacobian for every
+        hand-geom × object pair within ``threshold``.
+
+        Covers all collision geoms in the hand body tree (5 palm boxes + 20
+        finger capsules = 25 geoms under the default HO-Cap scene), not just
+        fingertips. Matches OmniRetarget's
+        ``_update_jacobians_and_phis_from_q`` pattern but restricted to
+        hand × single-object pairs (no self-collision, no ground).
+
+        Must call ``forward()`` first to refresh kinematics.
+
+        Args:
+            threshold: max signed distance (meters) to report. Pairs with
+                phi > threshold are skipped. Pass a value slightly above the
+                expected maximum penetration plus margin for active set.
+
+        Returns:
+            List of (J_contact, phi, geom_id, body_id) per pair:
+              J_contact : (nq,) sign(phi)·n̂ · J_p(world, body, contact_point)
+              phi       : signed distance (+ separated, − penetrating)
+              geom_id   : MuJoCo geom id on the hand
+              body_id   : MuJoCo body id hosting that geom
+        """
+        import mujoco as mj
+
+        if not getattr(self, "_has_object", False):
+            return []
+
+        results = []
+        fromto = np.zeros(6)
+        jacp = np.zeros((3, self.nv))
+        obj_gid = self._obj_geom_id
+
+        for gid in self._hand_col_geom_ids:
+            phi = mj.mj_geomDistance(
+                self.model, self.data, gid, obj_gid, threshold, fromto
+            )
+            if phi > threshold:
+                continue
+
+            # Closest points in world frame
+            p_hand = fromto[:3]
+            p_obj = fromto[3:]
+            diff = p_hand - p_obj
+            dist = np.linalg.norm(diff)
+            if dist < 1e-10:
+                # Degenerate: closest points coincide (tangential or deep
+                # penetration edge case). Skip this pair this iter; next
+                # iter's geometry should recover a non-zero normal.
+                continue
+
+            # Contact normal: sign(phi) flips the vector when phi<0 so nhat
+            # always points in the "separation" direction regardless of
+            # whether we are separated or penetrating. This matches
+            # OmniRetarget's _compute_jacobian_for_contact_relative.
+            sign = 1.0 if phi >= 0.0 else -1.0
+            nhat = sign * (diff / dist)
+
+            body_id = int(self.model.geom_bodyid[gid])
+            mj.mj_jac(self.model, self.data, jacp, None, p_hand, body_id)
+
+            # Object is a mocap body (J_obj = 0), so relative Jacobian = J_hand.
+            J_contact = nhat @ jacp  # (nq,)
+            results.append((J_contact.copy(), float(phi), int(gid), body_id))
+
+        return results
+
     # ==========================================================================
     # Private Methods
     # ==========================================================================
+
+    def _collect_hand_col_geoms(self, hand_side: str) -> list[int]:
+        """Collect collision-primitive geom ids belonging to the hand body tree.
+
+        Walks descendants of the wrist body and keeps geoms that are:
+          * hosted by a hand body,
+          * have nonzero contype or conaffinity, AND
+          * are primitives (BOX / CAPSULE / SPHERE / ELLIPSOID) rather than MESH.
+
+        The MESH exclusion is important: ``inject_object_mesh`` enables
+        collision on all geoms under the hand (for visualization), but the
+        per-link visual STL meshes are redundant with the hand-crafted
+        collision primitives and would inflate the constraint row count
+        ~2× while producing near-parallel Jacobians on the same body
+        (LICQ-unfriendly for the QP). Expected count on the default single-
+        hand HO-Cap scene: 25 (5 palm boxes + 20 finger capsules).
+        """
+        import mujoco as mj
+
+        m = self.model
+        candidates = [
+            f"wuji_{hand_side[0]}h_wrist",  # bimanual scenes use lh/rh prefix
+            "wuji_wrist",                    # single-hand scenes
+        ]
+        wrist_bid = -1
+        for name in candidates:
+            try:
+                bid = mj.mj_name2id(m, mj.mjtObj.mjOBJ_BODY, name)
+            except Exception:
+                bid = -1
+            if bid >= 0:
+                wrist_bid = bid
+                break
+        if wrist_bid < 0:
+            return []
+
+        # BFS over hand body tree
+        hand_bodies: set[int] = set()
+        stack = [wrist_bid]
+        while stack:
+            b = stack.pop()
+            hand_bodies.add(b)
+            for child in range(m.nbody):
+                if m.body_parentid[child] == b:
+                    stack.append(child)
+
+        mesh_type = int(mj.mjtGeom.mjGEOM_MESH)
+        geom_ids: list[int] = []
+        for g in range(m.ngeom):
+            if m.geom_bodyid[g] not in hand_bodies:
+                continue
+            if m.geom_contype[g] == 0 and m.geom_conaffinity[g] == 0:
+                continue
+            if int(m.geom_type[g]) == mesh_type:
+                continue  # skip redundant visual meshes duplicating primitives
+            geom_ids.append(int(g))
+        return geom_ids
 
     def _rebuild_caches(self) -> None:
         """Rebuild body/site ID caches from the current MuJoCo model.

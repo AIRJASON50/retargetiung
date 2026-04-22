@@ -159,7 +159,10 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("optimization", "activate_joint_limits"): "activate_joint_limits",
     ("optimization", "floating_base"): "floating_base",
     ("optimization", "object_sample_count"): "object_sample_count",
-    ("optimization", "activate_non_penetration"): "activate_non_penetration",
+    ("optimization", "activate_non_penetration_warmup"): "activate_non_penetration_warmup",
+    ("optimization", "activate_non_penetration_s2"): "activate_non_penetration_s2",
+    ("optimization", "penetration_tolerance"): "penetration_tolerance",
+    ("optimization", "penetration_max_trust_shrinks"): "penetration_max_trust_shrinks",
     ("retarget", "global_scale"): "global_scale",
     ("retarget", "mediapipe_rotation"): "mediapipe_rotation",
     ("", "hand_side"): "hand_side",
@@ -202,7 +205,19 @@ class HandRetargetConfig:
     n_iter_first: int = 20  # SQP iterations for first frame (probe: real usage ≤ 4)
     n_iter: int = 10  # SQP iterations for subsequent frames
     activate_joint_limits: bool = True
-    activate_non_penetration: bool = False  # fingertip-object non-penetration (linearized SDF)
+
+    # Non-penetration (hand geoms × object) hard constraints, linearized SQP.
+    # Independent flags per stage so ablations can test where the constraint
+    # contributes. Both False = legacy behavior (no penetration avoidance).
+    activate_non_penetration_warmup: bool = False
+    activate_non_penetration_s2: bool = False
+    # SQP tolerance (meters) on linearized inequality: J_contact · dq ≥ -phi - tol.
+    # Pure slack for numerical convergence, unrelated to any geometric bias --
+    # hand collision capsules already carry their own radius via mj_geomDistance.
+    penetration_tolerance: float = 1e-3
+    # If a QP is infeasible, halve the trust region up to this many times before
+    # declaring the iteration structurally infeasible (frame may stall).
+    penetration_max_trust_shrinks: int = 3
 
     # Convergence thresholds (unified to q-space ||Δq|| (rad) for both stages)
     warmup_convergence_delta: float = 1e-3  # S1 cosine IK per-outer-iter stop
@@ -392,6 +407,15 @@ class HandRetargetConfig:
             parts.append("aw")
         if not self.activate_joint_limits:
             parts.append("nojl")
+        # Non-penetration scope for cache disambiguation in ablations.
+        np_w = self.activate_non_penetration_warmup
+        np_s = self.activate_non_penetration_s2
+        if np_w and np_s:
+            parts.append("np-both")
+        elif np_w:
+            parts.append("np-warmup")
+        elif np_s:
+            parts.append("np-s2")
 
         # Hash covers full config (minus mjcf_path which is environment-specific)
         d = dataclasses.asdict(self)
