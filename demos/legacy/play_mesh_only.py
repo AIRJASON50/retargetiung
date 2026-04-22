@@ -39,7 +39,7 @@ from demos.shared.overlay import add_line, add_sphere  # noqa: E402
 from demos.shared.playback import PlaybackController  # noqa: E402
 
 DEFAULT_PKL = PROJECT_DIR / "data" / "manus_for_pinch" / "manus1_5k.pkl"
-DEFAULT_CONFIG = PROJECT_DIR / "config" / "interaction_mesh_left.yaml"
+DEFAULT_CONFIG = PROJECT_DIR / "config" / "manus.yaml"
 HAND_SIDE = "left"
 
 # Colors

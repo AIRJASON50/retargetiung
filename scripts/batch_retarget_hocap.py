@@ -29,6 +29,7 @@ from hand_retarget.mediapipe_io import load_hocap_clip  # noqa: E402
 
 HOCAP_DIR = PROJECT_DIR / "data" / "hocap" / "hocap"
 CACHE_DIR = PROJECT_DIR / "data" / "cache" / "hocap"
+HOCAP_CONFIG_YAML = PROJECT_DIR / "config" / "hocap.yaml"
 SCENE_LEFT = PROJECT_DIR / "assets" / "scenes" / "single_hand_obj_left.xml"
 SCENE_RIGHT = PROJECT_DIR / "assets" / "scenes" / "single_hand_obj.xml"
 
@@ -64,9 +65,11 @@ def detect_handedness(npz_path: str, meta_path: str) -> list[str]:
 def retarget_one_hand(clip: dict, hand_side: str, obj_samples: int) -> dict:
     """Retarget a single hand and return qpos + wrist transforms."""
     scene = SCENE_LEFT if hand_side == "left" else SCENE_RIGHT
-    config = HandRetargetConfig(
-        mjcf_path=str(scene), hand_side=hand_side,
-        floating_base=True, object_sample_count=obj_samples,
+    config = HandRetargetConfig.from_yaml(
+        str(HOCAP_CONFIG_YAML),
+        mjcf_path=str(scene),
+        hand_side=hand_side,
+        object_sample_count=obj_samples,
     )
     retargeter = InteractionMeshHandRetargeter(config)
     qpos = retargeter.retarget_hocap_sequence(clip, use_semantic_weights=False)

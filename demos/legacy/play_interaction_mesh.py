@@ -47,7 +47,7 @@ from demos.shared.overlay import (  # noqa: E402
 from demos.shared.playback import PlaybackController  # noqa: E402
 
 DEFAULT_PKL = PROJECT_DIR / "data" / "manus_for_pinch" / "manus1_5k.pkl"
-DEFAULT_CONFIG = PROJECT_DIR / "config" / "interaction_mesh_left.yaml"
+DEFAULT_CONFIG = PROJECT_DIR / "config" / "manus.yaml"
 DEFAULT_MJCF = Path("/home/l/ws/doc/WujiRepo/urdf_cali/reference/result/xml/left.xml")  # MuJoCo XML for visualization
 DEFAULT_URDF = Path(_WUJI_SDK) / "wuji_retargeting" / "wuji_hand_description" / "urdf" / "left.urdf"  # Pinocchio URDF for retargeting (has tip_link)
 HAND_SIDE = "left"

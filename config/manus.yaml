@@ -1,0 +1,29 @@
+# Interaction Mesh Hand Retargeting Config (LEFT HAND)
+# Algorithm: S1 cosine IK + S2 Laplacian deformation (daqp QP solver)
+# Default ratio: anchor:laplacian:smooth = 5:5:1
+
+hand_side: left
+
+optimization:
+  step_size: 0.1                   # Trust region radius (box constraint)
+  smooth_weight: 1.0               # Temporal smoothness (5:5:1 ratio)
+  n_iter_first: 20                 # S2 QP iterations for first frame (measured usage ≤ 4)
+  n_iter: 10                       # S2 QP iterations for subsequent frames
+  activate_joint_limits: true
+  warmup_convergence_delta: 0.001  # ||Δq|| (rad) to stop S1 outer loop
+  s2_convergence_delta: 0.001      # ||Δq|| (rad) to stop S2 loop (q-norm, not cost-delta)
+  anchor_mode: cosik_live          # "cosik_live" (default, single-level) | "l2" (legacy bilevel)
+  anchor_cosik_weight: 5.0         # w_rot on live cos-IK term in S2 cost (same scale as warmup)
+
+angle_warmup:
+  enabled: true
+  weight: 5.0              # S1 bone direction alignment weight
+  iters_first: 20          # S1 outer-loop cap for first frame (far from source)
+  iters: 5                 # S1 outer-loop cap for subsequent frames (warm-start)
+  anchor_weight: 5.0       # Angle anchor in joint cost
+
+retarget:
+  mediapipe_rotation:
+    x: 0.0
+    y: 0.0
+    z: 15.0

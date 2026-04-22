@@ -95,14 +95,19 @@ def detect_handedness(npz_path: str, meta_path: str) -> tuple[list[str], str]:
     return hands, handedness
 
 
+HOCAP_CONFIG_YAML = PROJECT_DIR / "config" / "hocap.yaml"
+
+
 def retarget_hand(clip: dict, hand_side: str, scene_xml: Path,
                   obj_samples: int, semantic_weight: bool,
                   link_midpoint: bool = False,
                   angle_warmup: bool = False) -> dict:
     """Retarget one hand and return qpos + per-frame wrist transforms."""
-    config = HandRetargetConfig(
-        mjcf_path=str(scene_xml), hand_side=hand_side,
-        floating_base=True, object_sample_count=obj_samples,
+    config = HandRetargetConfig.from_yaml(
+        str(HOCAP_CONFIG_YAML),
+        mjcf_path=str(scene_xml),
+        hand_side=hand_side,
+        object_sample_count=obj_samples,  # CLI override
     )
     if link_midpoint:
         config.use_link_midpoints = True
@@ -418,9 +423,11 @@ def main():
             cached = np.load(cache_path, allow_pickle=True)
             if f"qpos_{hand_side}" in cached:
                 print(f"\n  {hand_side} hand: loaded from cache")
-                config = HandRetargetConfig(
-                    mjcf_path=str(scene), hand_side=hand_side,
-                    floating_base=True, object_sample_count=args.obj_samples,
+                config = HandRetargetConfig.from_yaml(
+                    str(HOCAP_CONFIG_YAML),
+                    mjcf_path=str(scene),
+                    hand_side=hand_side,
+                    object_sample_count=args.obj_samples,
                 )
                 retargeter = InteractionMeshHandRetargeter(config)
                 hand_data[hand_side] = {

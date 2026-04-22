@@ -51,6 +51,7 @@ from hand_retarget import InteractionMeshHandRetargeter, HandRetargetConfig  # n
 from hand_retarget.mediapipe_io import load_hocap_clip  # noqa: E402
 
 HOCAP_DIR = PROJECT_DIR / "data" / "hocap" / "hocap"
+HOCAP_CONFIG_YAML = PROJECT_DIR / "config" / "hocap.yaml"
 SCENE = {
     "left":  str(PROJECT_DIR / "assets" / "scenes" / "single_hand_obj_left.xml"),
     "right": str(PROJECT_DIR / "assets" / "scenes" / "single_hand_obj.xml"),
@@ -102,7 +103,8 @@ def retarget_clip(clip_id: str, config_kw: dict, frames: int | None) -> dict:
                     for k, v in clip.items()}
             clip["object_pts_local"] = pts_local
 
-        cfg = HandRetargetConfig(
+        cfg = HandRetargetConfig.from_yaml(
+            str(HOCAP_CONFIG_YAML),
             mjcf_path=SCENE[hand_side],
             hand_side=hand_side,
             **config_kw,
@@ -192,7 +194,9 @@ def main() -> None:
     config_kw = build_config_kw(args)
 
     # Compute stamp from a representative config (hand_side doesn't affect stamp fields)
-    probe_cfg = HandRetargetConfig(mjcf_path="", hand_side="right", **config_kw)
+    probe_cfg = HandRetargetConfig.from_yaml(
+        str(HOCAP_CONFIG_YAML), mjcf_path="", hand_side="right", **config_kw,
+    )
     stamp = probe_cfg.make_stamp()
     config_json = json.dumps(
         {k: v for k, v in dataclasses.asdict(probe_cfg).items() if k != "mjcf_path"},

@@ -34,7 +34,7 @@ from hand_retarget import InteractionMeshHandRetargeter, HandRetargetConfig
 from hand_retarget.mediapipe_io import load_pkl_sequence, preprocess_sequence
 
 DEFAULT_PKL = PROJECT_DIR / "data" / "manus_for_pinch" / "manus1_5k.pkl"
-DEFAULT_CONFIG = PROJECT_DIR / "config" / "interaction_mesh_left.yaml"
+DEFAULT_CONFIG = PROJECT_DIR / "config" / "manus.yaml"
 DEFAULT_URDF = Path(
     "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public/"
     "wuji_retargeting/wuji_hand_description/urdf/left.urdf"

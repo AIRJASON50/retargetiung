@@ -27,3 +27,6 @@ log/
 *.swp
 *.swo
 .worktrees/
+
+# Local source backups (kept out of git; delete after manual verification)
+backups/

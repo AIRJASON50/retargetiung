@@ -1,0 +1,32 @@
+# HO-Cap manipulation dataset retargeting config
+# Floating base (6 DOF wrist + 20 finger = 26 DOF), hand + object interaction.
+#
+# Not in this YAML (decided per-run in Python):
+#   - hand_side:  auto-detected per clip (MediaPipe left/right availability)
+#   - mjcf_path:  resolved from scene selection (left/right/bimanual)
+#   - mediapipe_rotation:  unused in HO-Cap (SVD+MANO alignment supersedes it)
+
+optimization:
+  step_size: 0.1
+  smooth_weight: 1.0
+  n_iter_first: 20                 # measured usage ≤ 4; cap kept loose for safety
+  n_iter: 10
+  activate_joint_limits: true
+  floating_base: true              # HO-Cap: 6 DOF wrist (locked to SVD frame) + 20 finger
+  object_sample_count: 50          # surface points sampled from the object mesh each clip
+  activate_non_penetration: false  # will flip on in the hard-constraint ablation
+  warmup_convergence_delta: 0.001
+  s2_convergence_delta: 0.001
+  anchor_mode: cosik_live
+  anchor_cosik_weight: 5.0
+
+angle_warmup:
+  enabled: true
+  weight: 5.0
+  iters_first: 20
+  iters: 5
+  anchor_weight: 5.0
+
+# Topology / Laplacian tuning
+delaunay_edge_threshold: 0.06      # filter Delaunay edges > 60 mm (cross-finger noise)
+laplacian_distance_weight_k: 20.0  # exponential distance decay in Laplacian weights

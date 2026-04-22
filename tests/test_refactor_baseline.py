@@ -23,12 +23,9 @@ import os; _WUJI_SDK = os.environ.get("WUJI_SDK_PATH", "/home/l/ws/doc/WujiRepo/
 from hand_retarget import HandRetargetConfig, InteractionMeshHandRetargeter
 from hand_retarget.mediapipe_io import load_pkl_sequence, preprocess_sequence
 
-URDF = Path(
-    _WUJI_SDK
-    "wuji_retargeting/wuji_hand_description/urdf/left.urdf"
-)
+URDF = Path(_WUJI_SDK) / "wuji_retargeting/wuji_hand_description/urdf/left.urdf"
 PKL = PROJECT_DIR / "data" / "manus_for_pinch" / "manus1_5k.pkl"
-CONFIG_YAML = PROJECT_DIR / "config" / "interaction_mesh_left.yaml"
+CONFIG_YAML = PROJECT_DIR / "config" / "manus.yaml"
 BASELINE_NPZ = PROJECT_DIR / "tests" / "refactor_baseline.npz"
 N_FRAMES = 100
 HAND_SIDE = "left"

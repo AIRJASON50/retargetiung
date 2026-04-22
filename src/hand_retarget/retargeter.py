@@ -22,7 +22,6 @@ from .config import (
     JOINTS_MAPPING_RIGHT,
     MIDPOINT_SEGMENTS,
     HandRetargetConfig,
-    _build_midpoint_body_pairs,
 )
 from .mediapipe_io import load_pkl_sequence
 from .mesh_utils import (
@@ -58,8 +57,28 @@ CAPSULE_RADIUS: float = 0.0075
 PENETRATION_QUERY_THRESHOLD: float = 0.05
 """Max signed distance (meters) for fingertip-object proximity queries."""
 
-HOCAP_N_ITER_FIRST: int = 200
-"""SQP iterations for the first frame in HO-Cap object-interaction mode."""
+HOCAP_N_ITER_FIRST: int = 20
+"""SQP iterations for the first frame in HO-Cap object-interaction mode.
+
+Measured first-frame usage is ~4 iter (see experiments/archive/warmup_diagnosis/
+probe_s2_iters.py); the cap is kept intentionally loose but no longer a misleading
+200. Early-stop on ||Δq|| < config.s2_convergence_delta always triggers first."""
+
+FINGER_CHAINS_MP: tuple[tuple[int, ...], ...] = (
+    (0, 1, 2, 3, 4),  # thumb:  WRIST, CMC,  MCP,  IP,  TIP
+    (0, 5, 6, 7, 8),  # index:  WRIST, MCP,  PIP,  DIP, TIP
+    (0, 9, 10, 11, 12),  # middle
+    (0, 13, 14, 15, 16),  # ring
+    (0, 17, 18, 19, 20),  # pinky
+)
+"""MediaPipe chain indices (WRIST → finger TIP) for each of the 5 fingers.
+
+Shared by ``solve_angle_warmup`` and ``_compute_bone_dir_residuals_and_jac``
+so the bone topology lives in exactly one place."""
+
+_NON_THUMB_MCP_MP: frozenset[int] = frozenset({5, 9, 13, 17})
+"""MediaPipe indices for non-thumb MCP landmarks. These are the only endpoints
+whose robot-body surrogate is governed by ``config.mcp_surrogate``."""
 
 
 # ==============================================================================
@@ -103,9 +122,11 @@ class InteractionMeshHandRetargeter:
         else:
             self.hand = PinocchioHandModel(config.mjcf_path)
 
-        # Keypoint mapping: sorted by MediaPipe index
+        # Keypoint mapping: sorted by MediaPipe index. ``body_names`` is a
+        # @property so it always reflects the current MCP/thumb-CMC surrogate
+        # — downstream callers (visualization, tests) see the same body the
+        # solver optimized against.
         self.mp_indices = sorted(config.joints_mapping.keys())
-        self.body_names = [config.joints_mapping[i] for i in self.mp_indices]
         self.n_keypoints = len(self.mp_indices)  # 21
 
         # Joint limits
@@ -137,12 +158,12 @@ class InteractionMeshHandRetargeter:
             from wuji_retargeting.mediapipe import OPERATOR2MANO_RIGHT as OP2MANO
         self._R_mano = np.array(OP2MANO, dtype=np.float64)
 
-        # Link-midpoint mode: override keypoint count and build midpoint specs
+        # Link-midpoint mode: override keypoint count. We keep the mp-index
+        # pair specification (``MIDPOINT_SEGMENTS``) and resolve bodies on
+        # demand through ``_mp_body_pos_jacp`` so the surrogate flags reach
+        # this mode too — avoiding a stale pre-computed body-name list.
         if config.use_link_midpoints:
             self._midpoint_spec = MIDPOINT_SEGMENTS
-            self._midpoint_body_pairs = _build_midpoint_body_pairs(
-                JOINTS_MAPPING_LEFT if config.hand_side == "left" else JOINTS_MAPPING_RIGHT
-            )
             self.n_keypoints = len(self._midpoint_spec)  # 20
             # TIP is at index 4f+3 for finger f
             self._thumb_tip_mapped = 3
@@ -163,14 +184,6 @@ class InteractionMeshHandRetargeter:
                         if mp_idx in self.mp_indices:
                             self._excluded_finger_kp_indices.append(self.mp_indices.index(mp_idx))
 
-        # Angle warmup: cache T-pose body points at default pose
-        if config.use_angle_warmup:
-            q0 = self.hand.get_default_qpos()
-            self.hand.forward(q0)
-            _jm = JOINTS_MAPPING_LEFT if config.hand_side == "left" else JOINTS_MAPPING_RIGHT
-            self._tpose_body_pts = self.hand.get_body_positions([_jm[i] for i in range(21)])
-            self._angle_q0 = q0.copy()
-
     # ==========================================================================
     # Public Methods
     # ==========================================================================
@@ -185,6 +198,7 @@ class InteractionMeshHandRetargeter:
         object_pts: np.ndarray | None = None,
         obj_frame: tuple[np.ndarray, np.ndarray] | None = None,
         angle_targets: tuple[np.ndarray, np.ndarray] | None = None,
+        cosik_live_landmarks: np.ndarray | None = None,
     ) -> tuple[np.ndarray, float]:
         """Single iteration: linearize Laplacian and solve QP.
 
@@ -198,7 +212,14 @@ class InteractionMeshHandRetargeter:
                 obj_frame set, else world frame.
             obj_frame: (R_obj_inv, t_obj) for object-frame Laplacian, or None
                 for world frame.
-            angle_targets: (target_q, confidence) from Stage 1 cosine IK, or None.
+            angle_targets: (target_q, confidence) L2 anchor from Stage 1 cosine IK.
+                Used when anchor_mode="l2". Mutually exclusive with cosik_live_landmarks.
+            cosik_live_landmarks: (21, 3) MediaPipe landmarks for live cos-IK cost
+                term (anchor_mode="cosik_live"). Mutually exclusive with angle_targets.
+                Contributes ``w_rot · Σ_bones ‖d_rob(q) − d_src‖²`` at current q —
+                anisotropic anchor that penalizes bone-direction changes but leaves
+                low-sensitivity directions (e.g. MCP abduction, cross-finger
+                geometry) for IM to explore.
 
         Returns:
             Tuple of (q_new, cost): updated joint angles and optimization cost.
@@ -287,6 +308,16 @@ class InteractionMeshHandRetargeter:
                     H[j, j] += w_a
                     c[j] += w_a * angle_diff[j]
 
+        # Live cos-IK anchor: penalise ||d_rob(q) - d_src||² per bone at CURRENT q.
+        # Hessian J^T J is anisotropic (has 1/bone_length factors), so directions that
+        # don't affect bone direction (e.g. MCP yaw, cross-finger) remain free for IM.
+        if cosik_live_landmarks is not None:
+            w_rot = self.config.anchor_cosik_weight
+            r_bones, J_bones = self._compute_bone_dir_residuals_and_jac(cosik_live_landmarks)
+            if r_bones.size:
+                H += w_rot * (J_bones.T @ J_bones)
+                c += w_rot * (J_bones.T @ r_bones)
+
         # Box constraints: joint limits + trust region
         lb = -self.config.step_size * np.ones(nq)
         ub = self.config.step_size * np.ones(nq)
@@ -328,13 +359,19 @@ class InteractionMeshHandRetargeter:
         landmarks_21: np.ndarray,
         n_iters: int | None = None,
     ) -> np.ndarray:
-        """Stage 1: GMR-style bone direction alignment using IK.
+        """Stage 1: bone-direction cosine IK (GMR-inspired, but unit-vector residuals
+        instead of mink SE3 FrameTask).
 
-        For each finger chain, match the bone direction (cosine) between
-        source and robot. Uses FK + Jacobian per iteration.
+        For each finger chain, match the unit bone direction between source and robot.
+        Uses FK + Jacobian per iteration. Scale-invariant by construction -- does not
+        depend on bone length, only direction.
 
         Cost per bone: w_rot * ||robot_bone_dir - source_bone_dir||^2
-        End-effector (TIP): w_tip * ||robot_tip_pos - source_tip_pos||^2
+
+        Previously included a tip-position anchor (w_tip=100). Validated as near-no-op
+        on Manus (max Δq ~1.9°, RMS 0.34°) and HO-Cap (RMS 0.24° across 710 frames / 3
+        clips); removed for cleaner cost-constraint semantics (see
+        doc/exp_warmup_tip_anchor_removal.md).
 
         Args:
             q_current: (nq,) current joint angles.
@@ -344,16 +381,7 @@ class InteractionMeshHandRetargeter:
         Returns:
             (nq,) updated joint angles after bone direction alignment.
         """
-        chains_mp = [
-            [0, 1, 2, 3, 4],
-            [0, 5, 6, 7, 8],
-            [0, 9, 10, 11, 12],
-            [0, 13, 14, 15, 16],
-            [0, 17, 18, 19, 20],
-        ]
-        _jm = JOINTS_MAPPING_LEFT if self.config.hand_side == "left" else JOINTS_MAPPING_RIGHT
         w_rot = self.config.angle_warmup_weight
-        w_tip = 100.0  # strong anchor on fingertips
         eps = 1e-8
 
         iters = n_iters if n_iters is not None else self.config.angle_warmup_iters
@@ -363,16 +391,14 @@ class InteractionMeshHandRetargeter:
             residuals = []
             J_rows = []
 
-            for f, chain in enumerate(chains_mp):
+            for f, chain in enumerate(FINGER_CHAINS_MP):
                 for k in range(4):  # 4 bones per finger
                     parent_mp = chain[k]
                     child_mp = chain[k + 1]
-                    parent_body = _jm[parent_mp]
-                    child_body = _jm[child_mp]
 
-                    # Robot bone direction
-                    rp = self.hand.get_body_pos(parent_body)
-                    rc = self.hand.get_body_pos(child_body)
+                    # Robot bone endpoints (honors config.mcp_surrogate for non-thumb MCP)
+                    rp, Jp = self._mp_body_pos_jacp(parent_mp)
+                    rc, Jc = self._mp_body_pos_jacp(child_mp)
                     e_rob = rc - rp
                     e_len = np.linalg.norm(e_rob)
                     if e_len < eps:
@@ -390,25 +416,12 @@ class InteractionMeshHandRetargeter:
                     res = d_rob - d_src
 
                     # Jacobian of unit direction: (I - d*d^T)/||e|| @ J_e
-                    Jp = self.hand.get_body_jacp(parent_body)
-                    Jc = self.hand.get_body_jacp(child_body)
                     Je = Jc - Jp
                     P = (np.eye(3) - np.outer(d_rob, d_rob)) / e_len
                     J_dir = P @ Je
 
                     residuals.append(np.sqrt(w_rot) * res)
                     J_rows.append(np.sqrt(w_rot) * J_dir)
-
-                # TIP position anchor
-                tip_mp = chain[4]
-                tip_body = _jm[tip_mp]
-                rob_tip = self.hand.get_body_pos(tip_body)
-                src_tip = landmarks_21[tip_mp]
-                res_tip = rob_tip - src_tip
-                J_tip = self.hand.get_body_jacp(tip_body)
-
-                residuals.append(np.sqrt(w_tip) * res_tip)
-                J_rows.append(np.sqrt(w_tip) * J_tip)
 
             if not residuals:
                 break
@@ -440,44 +453,182 @@ class InteractionMeshHandRetargeter:
 
         return q_current
 
-    def _extract_cosik_targets(
-        self,
-        q_current: np.ndarray,
-        q_prev: np.ndarray,
-        landmarks_21: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Extract cosine IK angle targets for use as anchor in joint cost.
+    def _compute_bone_dir_residuals_and_jac(self, landmarks_21: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Compute stacked unit-bone-direction residuals and Jacobians at current q.
 
-        Runs a few S1 iterations to convergence, then returns (target_q, confidence).
+        Assumes ``self.hand.forward(q)`` has already been called at the desired
+        linearization point. Used by the cosik_live anchor mode in
+        ``solve_single_iteration`` and mirrored (but re-computed inline) in
+        ``solve_angle_warmup``.
 
-        Args:
-            q_current: (nq,) current joint angles.
-            q_prev: (nq,) joint angles from previous frame.
-            landmarks_21: (21, 3) MediaPipe landmarks.
+        For each of 20 bones (5 fingers × 4 bones):
+            r_bone = (p_child - p_parent).normalized - (lm_child - lm_parent).normalized
+            J_bone = (I - d_rob d_robᵀ) / ‖e_rob‖ · (J_child - J_parent)
 
         Returns:
-            Tuple of (target_q, confidence): target joint angles and per-joint confidence.
+            residuals: (n_valid_bones * 3,) stacked unit-vector differences.
+            J_stacked: (n_valid_bones * 3, nq) stacked direction Jacobians.
         """
-        q_target = q_current.copy()
-        for _ in range(3):
-            q_before = q_target.copy()
-            q_target = self.solve_angle_warmup(q_target, q_prev, landmarks_21, n_iters=1)
-            if np.linalg.norm(q_target - q_before) < 1e-3:
-                break
+        eps = 1e-8
 
+        res_list: list[np.ndarray] = []
+        J_list: list[np.ndarray] = []
+        for chain in FINGER_CHAINS_MP:
+            for k in range(4):
+                rp, Jp = self._mp_body_pos_jacp(chain[k])
+                rc, Jc = self._mp_body_pos_jacp(chain[k + 1])
+                e_rob = rc - rp
+                e_len = float(np.linalg.norm(e_rob))
+                if e_len < eps:
+                    continue
+                d_rob = e_rob / e_len
+
+                e_src = landmarks_21[chain[k + 1]] - landmarks_21[chain[k]]
+                s_len = float(np.linalg.norm(e_src))
+                if s_len < eps:
+                    continue
+                d_src = e_src / s_len
+
+                P = (np.eye(3) - np.outer(d_rob, d_rob)) / e_len
+
+                res_list.append(d_rob - d_src)
+                J_list.append(P @ (Jc - Jp))
+
+        if not res_list:
+            return np.zeros(0), np.zeros((0, self.nq))
+        return np.concatenate(res_list), np.vstack(J_list)
+
+    def _mp_body_name(self, mp_idx: int) -> str:
+        """Return the robot body name that the current surrogate config resolves
+        ``mp_idx`` to. For ``mcp_surrogate="midpoint"`` there is no single body —
+        we return the link1 name (the body the visualization closest matches)
+        and callers that need exact positions should use ``_mp_body_pos_jacp``.
+        """
+        _jm = JOINTS_MAPPING_LEFT if self.config.hand_side == "left" else JOINTS_MAPPING_RIGHT
+        body = _jm[mp_idx]
+        if mp_idx == 1 and self.config.thumb_cmc_surrogate == "link2":
+            return body[: -len("link1")] + "link2"
+        if mp_idx in _NON_THUMB_MCP_MP and self.config.mcp_surrogate == "link2":
+            return body[: -len("link1")] + "link2"
+        return body
+
+    @property
+    def body_names(self) -> list[str]:
+        """Robot body names for the 21 (or 20, in midpoint mode) mapped keypoints.
+
+        Surrogate-aware: non-thumb MCP and thumb CMC reflect the current
+        ``config.mcp_surrogate`` / ``config.thumb_cmc_surrogate``. Kept as a
+        property (not a field) so runtime config changes take effect without
+        reconstructing the retargeter.
+
+        Note: when ``config.mcp_surrogate == "midpoint"`` there is no single
+        body; this property returns the link1 name as the "display-closest"
+        answer. Consumers needing exact positions should call
+        ``_mp_body_pos_jacp`` (or iterate ``get_body_positions(body_names)`` for
+        an approximation).
+        """
+        return [self._mp_body_name(i) for i in self.mp_indices]
+
+    def _mp_body_pos_jacp(self, mp_idx: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return (world position, positional Jacobian 3×nq) for the robot body
+        corresponding to a MediaPipe landmark, honoring surrogate flags.
+
+        Non-thumb MCP (mp_idx ∈ {5, 9, 13, 17}) — ``config.mcp_surrogate``
+        (default ``"link2"``):
+
+            "link1"     joints_mapping direct (flex-pivot body, legacy)
+            "link2"     finger{f}_link1 → finger{f}_link2 (abd-pivot)
+            "midpoint"  0.5·(link1 + link2) position + Jacobian
+
+        Plus an optional constant offset ``config.mcp_surface_offset_m`` along the
+        palm back-normal to approximate the MediaPipe skin-surface landmark
+        (default 0; C5 ablation showed positive values degraded quality).
+
+        Thumb CMC (mp_idx=1) — ``config.thumb_cmc_surrogate`` (default ``"link2"``):
+
+            "link1"     finger1_link1 (first CMC hinge, legacy)
+            "link2"     finger1_link2 (after 2nd CMC hinge)
+
+        Other landmarks (wrist, thumb MCP/IP/TIP, other finger PIP/DIP/TIP)
+        always use ``joints_mapping`` directly. Callers must have already called
+        ``self.hand.forward(q)``. This is the single entry point for landmark →
+        body mapping across cos-IK bones, warmup tip anchor, and IM keypoints.
+        """
+        _jm = JOINTS_MAPPING_LEFT if self.config.hand_side == "left" else JOINTS_MAPPING_RIGHT
+        body = _jm[mp_idx]
+
+        # Thumb CMC override
+        if mp_idx == 1 and self.config.thumb_cmc_surrogate == "link2":
+            body_l2 = body[: -len("link1")] + "link2"
+            return self.hand.get_body_pos(body_l2), self.hand.get_body_jacp(body_l2)
+
+        # Non-thumb MCP surrogate
+        if mp_idx in _NON_THUMB_MCP_MP:
+            mode = self.config.mcp_surrogate
+            body_l2 = body[: -len("link1")] + "link2"
+            if mode == "link1":
+                p, J = self.hand.get_body_pos(body), self.hand.get_body_jacp(body)
+            elif mode == "link2":
+                p, J = self.hand.get_body_pos(body_l2), self.hand.get_body_jacp(body_l2)
+            else:  # midpoint
+                p = 0.5 * (self.hand.get_body_pos(body) + self.hand.get_body_pos(body_l2))
+                J = 0.5 * (self.hand.get_body_jacp(body) + self.hand.get_body_jacp(body_l2))
+            # Back-of-hand surface offset
+            if self.config.mcp_surface_offset_m != 0.0:
+                n = self._palm_back_normal()
+                p = p + self.config.mcp_surface_offset_m * n
+                # Jacobian unchanged: when wrist is locked, n is constant in world;
+                # when wrist floats, this is a first-order approximation that
+                # ignores the Jacobian of n w.r.t. wrist DOFs (small, tolerable).
+            return p, J
+
+        # Default: direct mapping
+        return self.hand.get_body_pos(body), self.hand.get_body_jacp(body)
+
+    def _palm_back_normal(self) -> np.ndarray:
+        """Unit vector normal to the palm plane, pointing toward the back of the hand.
+
+        Derived from three anchors: WRIST (palm_link), INDEX_MCP (finger2_link1),
+        PINKY_MCP (finger5_link1). Cross product order is hand-side dependent so
+        the resulting normal consistently points toward the back of the hand
+        (opposite side of the palm surface where MediaPipe knuckle landmarks sit).
+        """
+        _jm = JOINTS_MAPPING_LEFT if self.config.hand_side == "left" else JOINTS_MAPPING_RIGHT
+        p_wrist = self.hand.get_body_pos(_jm[0])
+        p_idx = self.hand.get_body_pos(_jm[5])
+        p_pinky = self.hand.get_body_pos(_jm[17])
+        # Left hand: cross in this order points to the back of hand by OPERATOR2MANO
+        # convention; right hand is mirrored so we flip the sign.
+        n = np.cross(p_idx - p_wrist, p_pinky - p_wrist)
+        if self.config.hand_side == "right":
+            n = -n
+        norm = np.linalg.norm(n)
+        return n / norm if norm > 1e-8 else np.array([0.0, 0.0, 1.0])
+
+    def _build_anchor_confidence(self) -> np.ndarray:
+        """Per-joint confidence mask for the S2 angle-anchor cost term.
+
+        Wrist translation (0-2): 0.0  (position, not an angle — never anchored)
+        Wrist rotation    (3-5): 0.5  (weak anchor; S2 IM decides finer orientation)
+        Finger MCP abduction    : 0.5 (cosine IK extracts abduction poorly from a
+                                       single palm plane; let S2 correct it)
+        Other finger joints     : 1.0 (full anchor strength)
+
+        Used to be co-located with a redundant cosine-IK pass in
+        ``_extract_cosik_targets``; that pass was removed as a zombie
+        (see experiments/archive/warmup_diagnosis/probe_extract_targets.py —
+        99.4% of frames showed q_target − q_S1 ~ 3e-5 rad after the extra iters).
+        """
         confidence = np.ones(self.nq)
         if self.config.floating_base and self.nq > 20:
-            # Wrist translation (first 3 DOF): no angle anchor (position, not angle)
             confidence[:3] = 0.0
-            # Wrist rotation (DOF 3-5): anchor to S1's alignment
             confidence[3:6] = 0.5
-            # Finger MCP abduction: lower confidence
             for f in range(5):
                 confidence[6 + 4 * f + 1] = 0.5
         else:
             for f in range(5):
                 confidence[4 * f + 1] = 0.5
-        return q_target, confidence
+        return confidence
 
     def retarget_frame(
         self,
@@ -607,31 +758,55 @@ class InteractionMeshHandRetargeter:
         object_pts_local: np.ndarray | None = None,
         is_first_frame: bool = False,
     ) -> np.ndarray:
-        """Run S1 angle warmup + S2 Laplacian convergence loop."""
+        """Run S1 angle warmup + S2 Laplacian convergence loop.
+
+        Pipeline (both stages stop on q-space delta < configured threshold):
+          1. Warmup: run ``solve_angle_warmup`` in an outer loop to convergence.
+             First frame uses ``angle_warmup_iters_first`` (larger budget, since
+             q starts at default pose); subsequent frames use ``angle_warmup_iters``.
+          2. Anchor target = warmup's converged ``q_current`` directly (no extra
+             redundant cosine-IK pass; see ``_build_anchor_confidence`` docstring).
+          3. S2: iterate ``solve_single_iteration`` (IM + anchor + smooth) until
+             ``||Δq|| < s2_convergence_delta`` or ``n_iter`` cap.
+        """
         n_iter = self.config.n_iter_first if is_first_frame else self.config.n_iter
         q_current = q_prev.copy()
-        convergence_delta = 1e-3
+        warmup_conv = self.config.warmup_convergence_delta
+        s2_conv = self.config.s2_convergence_delta
 
         # Stage 1: cosine IK bone direction alignment
         if self.config.use_angle_warmup:
             lm_21 = landmarks[:21] if landmarks.shape[0] > 21 else landmarks
-            for _ in range(5):
+            max_warmup = self.config.angle_warmup_iters_first if is_first_frame else self.config.angle_warmup_iters
+            for _ in range(max_warmup):
                 q_before = q_current.copy()
                 q_current = self.solve_angle_warmup(q_current, q_prev, lm_21, n_iters=1)
-                if np.linalg.norm(q_current - q_before) < convergence_delta:
+                if np.linalg.norm(q_current - q_before) < warmup_conv:
                     break
 
-        # Compute angle targets for joint cost
+        # Anchor setup for S2. Two modes (see config.anchor_mode):
+        #   "cosik_live" (current default) : bone-direction cos-IK cost re-evaluated
+        #                                    at every S2 iter — single-level joint form
+        #   "l2"         (legacy)          : q-space L2 pull toward warmup's q_S1
+        # getattr fallback matches the dataclass default so out-of-date pickled
+        # configs still pick the principled mode.
+        anchor_mode = getattr(self.config, "anchor_mode", "cosik_live")
+        use_anchor = self.config.use_angle_warmup and (
+            self.config.angle_anchor_weight > 0 or self.config.anchor_cosik_weight > 0
+        )
         angle_targets_pair = None
-        if self.config.use_angle_warmup and self.config.angle_anchor_weight > 0:
-            lm_21 = landmarks[:21] if landmarks.shape[0] > 21 else landmarks
-            angle_targets_pair = self._extract_cosik_targets(q_current, q_prev, lm_21)
+        cosik_landmarks = None
+        if use_anchor:
+            if anchor_mode == "cosik_live":
+                cosik_landmarks = landmarks[:21] if landmarks.shape[0] > 21 else landmarks
+            else:  # "l2"
+                angle_targets_pair = (q_current.copy(), self._build_anchor_confidence())
 
-        # Stage 2: Laplacian position refinement
+        # Stage 2: Laplacian position refinement (stop on q-norm, not cost-delta)
         solve_obj_pts = object_pts_local if obj_frame is not None else object_pts_world
-        last_cost = float("inf")
         for _ in range(n_iter):
-            q_current, cost = self.solve_single_iteration(
+            q_before = q_current.copy()
+            q_current, _cost = self.solve_single_iteration(
                 q_current,
                 q_prev,
                 target_lap,
@@ -640,10 +815,10 @@ class InteractionMeshHandRetargeter:
                 object_pts=solve_obj_pts,
                 obj_frame=obj_frame,
                 angle_targets=angle_targets_pair,
+                cosik_live_landmarks=cosik_landmarks,
             )
-            if abs(last_cost - cost) < convergence_delta:
+            if np.linalg.norm(q_current - q_before) < s2_conv:
                 break
-            last_cost = cost
 
         return q_current
 
@@ -730,8 +905,10 @@ class InteractionMeshHandRetargeter:
             # SVD+MANO alignment puts landmarks in robot wrist frame already
             self.q_lb[:6] = 0.0
             self.q_ub[:6] = 0.0
-        # Override n_iter_first for HO-Cap (200 iters for complex object scenes).
-        # Uses save/restore because retarget_frame reads self.config.n_iter_first directly.
+        # Override n_iter_first with HOCAP_N_ITER_FIRST (currently 20 — loose upper
+        # bound well above measured usage of ~4 iter; early-stop on ||Δq|| always
+        # fires first). Uses save/restore because retarget_frame reads
+        # self.config.n_iter_first directly.
         self.config.n_iter_first = HOCAP_N_ITER_FIRST
 
         # Inject object mesh for non-penetration constraint
@@ -903,27 +1080,45 @@ class InteractionMeshHandRetargeter:
         return w
 
     def _get_robot_keypoints(self) -> np.ndarray:
-        """Get robot body positions for mapped keypoints. Returns (N, 3)."""
+        """Get robot body positions for mapped keypoints. Returns (N, 3).
+
+        All paths (standard 21-point and link-midpoint 20-point) resolve
+        bodies through ``_mp_body_pos_jacp``, so ``config.mcp_surrogate`` and
+        ``config.thumb_cmc_surrogate`` reach every keypoint consistently.
+        """
         if self.config.use_link_midpoints:
             pts = np.empty((self.n_keypoints, 3))
-            for k, (parent_body, child_body) in enumerate(self._midpoint_body_pairs):
-                if child_body is None:
-                    pts[k] = self.hand.get_body_pos(parent_body)
+            for k, (parent_mp, child_mp) in enumerate(self._midpoint_spec):
+                p_parent, _ = self._mp_body_pos_jacp(parent_mp)
+                if child_mp is None:
+                    pts[k] = p_parent
                 else:
-                    pts[k] = (self.hand.get_body_pos(parent_body) + self.hand.get_body_pos(child_body)) / 2
+                    p_child, _ = self._mp_body_pos_jacp(child_mp)
+                    pts[k] = 0.5 * (p_parent + p_child)
             return pts
-        return self.hand.get_body_positions(self.body_names)
+        pts = np.empty((self.n_keypoints, 3))
+        for k, mp_idx in enumerate(self.mp_indices):
+            pts[k], _ = self._mp_body_pos_jacp(mp_idx)
+        return pts
 
     def _get_robot_jacobians(self) -> np.ndarray:
-        """Get stacked Jacobians for mapped keypoints. Returns (3N, nq)."""
+        """Get stacked positional Jacobians for mapped keypoints. Returns (3N, nq).
+
+        Mirrors ``_get_robot_keypoints``: uses ``_mp_body_pos_jacp`` so MCP
+        surrogate choice is consistent across cos-IK and IM Jacobians in both
+        the standard and link-midpoint keypoint layouts.
+        """
         if self.config.use_link_midpoints:
             J = np.zeros((3 * self.n_keypoints, self.nq))
-            for k, (parent_body, child_body) in enumerate(self._midpoint_body_pairs):
-                if child_body is None:
-                    J[3 * k : 3 * k + 3] = self.hand.get_body_jacp(parent_body)
+            for k, (parent_mp, child_mp) in enumerate(self._midpoint_spec):
+                _, J_parent = self._mp_body_pos_jacp(parent_mp)
+                if child_mp is None:
+                    J[3 * k : 3 * k + 3] = J_parent
                 else:
-                    J[3 * k : 3 * k + 3] = (
-                        self.hand.get_body_jacp(parent_body) + self.hand.get_body_jacp(child_body)
-                    ) / 2
+                    _, J_child = self._mp_body_pos_jacp(child_mp)
+                    J[3 * k : 3 * k + 3] = 0.5 * (J_parent + J_child)
             return J
-        return self.hand.get_body_jacobians(self.body_names)
+        J = np.zeros((3 * self.n_keypoints, self.nq))
+        for k, mp_idx in enumerate(self.mp_indices):
+            _, J[3 * k : 3 * k + 3] = self._mp_body_pos_jacp(mp_idx)
+        return J

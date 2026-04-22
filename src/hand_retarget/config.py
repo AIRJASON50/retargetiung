@@ -11,12 +11,39 @@ import dataclasses
 import hashlib
 import json
 from dataclasses import dataclass, field
+from typing import Literal
 
 import yaml
 
 # ==============================================================================
 # Constants
 # ==============================================================================
+
+AnchorMode = Literal["l2", "cosik_live"]
+"""S2 anchor formulation: ``"cosik_live"`` (default, single-level joint
+cos-IK cost) or ``"l2"`` (legacy bilevel L2 pull to warmup's q_S1)."""
+
+ANCHOR_MODES: tuple[AnchorMode, ...] = ("l2", "cosik_live")
+"""Tuple of valid ``HandRetargetConfig.anchor_mode`` values, used for validation."""
+
+McpSurrogate = Literal["link1", "link2", "midpoint"]
+"""Which robot body represents the MediaPipe MCP landmark for non-thumb fingers.
+Wuji MCP is a 2-hinge compound (flex then abd, ~4.6 mm apart); MediaPipe MCP is
+a single ball joint. Options:
+
+- ``"link1"`` — flex-pivot body (pre-abd); was the historical default but biased
+  the "wrist→MCP" bone by ~5-10° because link1 sits before the abd pivot.
+- ``"link2"`` — abd-pivot body; default since ablation
+  (experiments/archive/warmup_diagnosis/probe_mcp_full_ablation.py) showed it
+  strictly improves wrist→MCP, tip_err, tip_obj, and fps.
+- ``"midpoint"`` — 0.5·(link1 + link2), approximates virtual ball-joint center.
+
+Applied uniformly via ``_mp_body_pos_jacp`` across cos-IK bone endpoints, warmup
+tip anchor, and Delaunay/Laplacian IM keypoints (both position and Jacobian),
+so there is a single MCP body convention across the whole pipeline."""
+
+MCP_SURROGATES: tuple[McpSurrogate, ...] = ("link1", "link2", "midpoint")
+"""Tuple of valid ``HandRetargetConfig.mcp_surrogate`` values."""
 
 JOINTS_MAPPING_LEFT = {
     0: "left_palm_link",  # WRIST
@@ -132,12 +159,20 @@ _YAML_FIELD_MAP: dict[tuple[str, str], str] = {
     ("optimization", "activate_joint_limits"): "activate_joint_limits",
     ("optimization", "floating_base"): "floating_base",
     ("optimization", "object_sample_count"): "object_sample_count",
+    ("optimization", "activate_non_penetration"): "activate_non_penetration",
     ("retarget", "global_scale"): "global_scale",
     ("retarget", "mediapipe_rotation"): "mediapipe_rotation",
     ("", "hand_side"): "hand_side",
+    ("", "delaunay_edge_threshold"): "delaunay_edge_threshold",
+    ("", "laplacian_distance_weight_k"): "laplacian_distance_weight_k",
     ("angle_warmup", "weight"): "angle_warmup_weight",
     ("angle_warmup", "iters"): "angle_warmup_iters",
+    ("angle_warmup", "iters_first"): "angle_warmup_iters_first",
     ("angle_warmup", "anchor_weight"): "angle_anchor_weight",
+    ("optimization", "warmup_convergence_delta"): "warmup_convergence_delta",
+    ("optimization", "s2_convergence_delta"): "s2_convergence_delta",
+    ("optimization", "anchor_mode"): "anchor_mode",
+    ("optimization", "anchor_cosik_weight"): "anchor_cosik_weight",
 }
 """Maps ``(yaml_section, yaml_key)`` to ``HandRetargetConfig`` field name."""
 
@@ -164,10 +199,14 @@ class HandRetargetConfig:
 
     # Optimization
     step_size: float = 0.1  # Trust region radius (box constraint)
-    n_iter_first: int = 50  # SQP iterations for first frame
+    n_iter_first: int = 20  # SQP iterations for first frame (probe: real usage ≤ 4)
     n_iter: int = 10  # SQP iterations for subsequent frames
     activate_joint_limits: bool = True
     activate_non_penetration: bool = False  # fingertip-object non-penetration (linearized SDF)
+
+    # Convergence thresholds (unified to q-space ||Δq|| (rad) for both stages)
+    warmup_convergence_delta: float = 1e-3  # S1 cosine IK per-outer-iter stop
+    s2_convergence_delta: float = 1e-3  # S2 Laplacian per-iter stop (q-norm, not cost-delta)
 
     # Object interaction
     object_sample_count: int = 100  # surface points sampled from object mesh
@@ -195,8 +234,42 @@ class HandRetargetConfig:
     # Default 5:5:1 ratio (anchor=5, laplacian via retargeter.laplacian_weight, smooth=1)
     use_angle_warmup: bool = True
     angle_warmup_weight: float = 5.0
-    angle_warmup_iters: int = 3
+    # Outer-loop cap on warmup iterations (solve_angle_warmup is called with n_iters=1).
+    # First frame starts from default pose (far from source) and needs a larger budget;
+    # steady-state warm-starts from previous q_final and converges in 2-3 iters.
+    angle_warmup_iters_first: int = 20
+    angle_warmup_iters: int = 5
     angle_anchor_weight: float = 5.0  # S1 angle anchor in joint cost
+
+    # Anchor formulation in S2 joint cost:
+    #   "cosik_live" (default) — w_rot * Σ ||d_rob(q) - d_src||²     single-level joint
+    #                                                                (principled; J^T J
+    #                                                                anisotropy leaves low-
+    #                                                                sensitivity directions
+    #                                                                free for IM)
+    #   "l2"          (legacy) — w_a   * ||q - q_S1||²              bilevel approximation,
+    #                                                                isotropic q-space pin;
+    #                                                                kept for A/B comparison
+    # See experiments/archive/warmup_diagnosis/probe_ab_cosik.py for ablation data.
+    anchor_mode: AnchorMode = "cosik_live"
+    # Weight on cos-IK term when anchor_mode="cosik_live". Same scale as angle_warmup_weight;
+    # the 1/bone_length factor inside J_dir already amplifies it, so this need not be large.
+    anchor_cosik_weight: float = 5.0
+    # MCP surrogate body for non-thumb cos-IK bones + IM keypoints. Applied
+    # uniformly via ``_mp_body_pos_jacp`` so bone endpoints and Delaunay vertices
+    # share the same physical point. Default ``link2`` (abd-pivot) — ablation
+    # (``probe_mcp_full_ablation.py``) showed link2 is universally better than
+    # link1 on wrist→MCP residual (-14%), tip_err (-2.6%), tip_obj (-4.4%), fps
+    # (+3%), with no metric regression.
+    mcp_surrogate: McpSurrogate = "link2"
+    # Back-of-hand offset applied to non-thumb MCP surrogate position (meters).
+    # Kept as a knob for future experiments but disabled by default: C5 ablation
+    # (offsets of 3/5/8 mm) all worsened every metric relative to offset=0.
+    mcp_surface_offset_m: float = 0.0
+    # Thumb CMC surrogate — analogous to ``mcp_surrogate`` but for the thumb.
+    # Wuji thumb CMC is a 2-hinge compound (joint1, joint2) 15.8 mm apart;
+    # default ``link2`` drops wrist→CMC residual by ~26% vs ``link1``.
+    thumb_cmc_surrogate: Literal["link1", "link2"] = "link2"
     smooth_weight: float = 1.0  # Temporal smoothness (5:5:1 ratio with anchor and laplacian)
     exclude_fingers_from_laplacian: list = None  # Finger indices (0-4) excluded from Laplacian gradient
 
@@ -214,22 +287,45 @@ class HandRetargetConfig:
         }
     )
 
+    def __post_init__(self) -> None:
+        """Run config-level validation after dataclass init."""
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate enum-like fields. Called by ``__post_init__`` and ``from_yaml``."""
+        if self.anchor_mode not in ANCHOR_MODES:
+            raise ValueError(f"anchor_mode must be one of {ANCHOR_MODES}, got {self.anchor_mode!r}")
+        if self.mcp_surrogate not in MCP_SURROGATES:
+            raise ValueError(
+                f"mcp_surrogate must be one of {MCP_SURROGATES}, got {self.mcp_surrogate!r}"
+            )
+
     @property
     def joints_mapping(self) -> dict[int, str]:
         """MediaPipe index -> robot body name mapping."""
         return JOINTS_MAPPING_LEFT if self.hand_side == "left" else JOINTS_MAPPING_RIGHT
 
     @classmethod
-    def from_yaml(cls, yaml_path: str, mjcf_path: str = "") -> HandRetargetConfig:
-        """Load config from YAML file.
+    def from_yaml(cls, yaml_path: str, mjcf_path: str = "", **overrides) -> HandRetargetConfig:
+        """Load config from YAML file, with optional Python-side overrides.
 
         Reads a nested YAML structure and maps values to dataclass fields
         via the module-level ``_YAML_FIELD_MAP``. Adding a new config field
         only requires adding one entry to the mapping table.
 
+        Override precedence (highest wins):
+            overrides > YAML > dataclass defaults
+
+        Typical use cases for ``**overrides``:
+          - HO-Cap: pass ``hand_side=<auto_detected>`` since YAML doesn't encode it.
+          - Experiments: pass single tuning knob (e.g. ``activate_non_penetration=True``)
+            without duplicating the whole YAML.
+
         Args:
             yaml_path: Path to the YAML config file.
             mjcf_path: Override for the ``mjcf_path`` field.
+            **overrides: Keyword overrides for any ``HandRetargetConfig`` field.
+                Unknown keys raise ``TypeError`` to catch typos fail-fast.
 
         Returns:
             Populated config instance.
@@ -254,6 +350,19 @@ class HandRetargetConfig:
             if sec_data.get("enabled", False):
                 setattr(cfg, field_name, True)
 
+        # Apply caller overrides last (highest precedence); fail fast on typos.
+        for key, value in overrides.items():
+            if key not in valid_fields:
+                raise TypeError(
+                    f"from_yaml got unknown override {key!r}; "
+                    f"valid fields: {sorted(valid_fields)}"
+                )
+            setattr(cfg, key, value)
+
+        # __post_init__ ran on the default-ctor cfg above; re-validate after
+        # YAML + override changes so invalid values fail-fast here rather than
+        # inside the solver.
+        cfg._validate()
         return cfg
 
     def make_stamp(self) -> str:

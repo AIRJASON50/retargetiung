@@ -86,7 +86,7 @@ def main():
     # Preprocess source landmarks for visualization
     from hand_retarget.config import HandRetargetConfig
     im_config = HandRetargetConfig.from_yaml(
-        str(PROJECT_DIR / "config" / "interaction_mesh_left.yaml"))
+        str(PROJECT_DIR / "config" / "manus.yaml"))
     proc_landmarks = np.zeros((total_frames, 21, 3))
     for t in range(total_frames):
         proc_landmarks[t] = preprocess_landmarks(

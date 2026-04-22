@@ -20,7 +20,7 @@ BASELINE = os.path.join(PROJECT_DIR, "tests/refactor_gate_baseline.npz")
 
 def test_import():
     """Basic import and initialization."""
-    from hand_retarget import InteractionMeshHandRetargeter, HandRetargetConfig
+    from hand_retarget import HandRetargetConfig, InteractionMeshHandRetargeter
 
     cfg = HandRetargetConfig(mjcf_path=URDF)
     r = InteractionMeshHandRetargeter(cfg)
@@ -32,7 +32,7 @@ def test_import():
 
 def test_retarget_regression():
     """100 frames must match frozen baseline within 0.01 degrees."""
-    from hand_retarget import InteractionMeshHandRetargeter, HandRetargetConfig
+    from hand_retarget import HandRetargetConfig, InteractionMeshHandRetargeter
     from hand_retarget.mediapipe_io import load_pkl_sequence, preprocess_sequence
 
     cfg = HandRetargetConfig(mjcf_path=URDF)
@@ -52,7 +52,7 @@ def test_retarget_regression():
 
 
 def test_config_defaults():
-    """Verify default config values for 5:5:1 ratio."""
+    """Verify default config values: 5:5:1 ratio, cosik_live anchor, link2 MCP surrogate."""
     from hand_retarget.config import HandRetargetConfig
 
     cfg = HandRetargetConfig()
@@ -60,11 +60,32 @@ def test_config_defaults():
     assert cfg.angle_anchor_weight == 5.0
     assert cfg.smooth_weight == 1.0
     assert cfg.global_scale == 1.0
+    assert cfg.anchor_mode == "cosik_live"
+    assert cfg.anchor_cosik_weight == 5.0
+    assert cfg.mcp_surrogate == "link2"
+    assert cfg.thumb_cmc_surrogate == "link2"
+    assert cfg.mcp_surface_offset_m == 0.0
+
+
+def test_anchor_mode_validation():
+    """Invalid anchor_mode should fail fast at config construction."""
+    from hand_retarget.config import HandRetargetConfig
+
+    with pytest.raises(ValueError, match="anchor_mode"):
+        HandRetargetConfig(mjcf_path=URDF, anchor_mode="bogus")
+
+
+def test_mcp_surrogate_validation():
+    """Invalid mcp_surrogate should fail fast at config construction."""
+    from hand_retarget.config import HandRetargetConfig
+
+    with pytest.raises(ValueError, match="mcp_surrogate"):
+        HandRetargetConfig(mjcf_path=URDF, mcp_surrogate="bogus")
 
 
 def test_synthetic_roundtrip():
     """FK generates landmarks, retarget recovers joint angles."""
-    from hand_retarget import InteractionMeshHandRetargeter, HandRetargetConfig
+    from hand_retarget import HandRetargetConfig, InteractionMeshHandRetargeter
 
     cfg = HandRetargetConfig(mjcf_path=URDF, use_angle_warmup=False)
     r = InteractionMeshHandRetargeter(cfg)

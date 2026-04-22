@@ -34,7 +34,7 @@ from hand_retarget.mesh_utils import (
 from benchmark import RetargetBenchmark
 
 DEFAULT_PKL = PROJECT_DIR / "data" / "manus1_5k.pkl"
-DEFAULT_CONFIG = PROJECT_DIR / "config" / "interaction_mesh_left.yaml"
+DEFAULT_CONFIG = PROJECT_DIR / "config" / "manus.yaml"
 DEFAULT_URDF = Path("/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public/wuji_retargeting/wuji_hand_description/urdf/left.urdf")
 BASELINE_CONFIG = PROJECT_DIR / "demos" / "hand" / "baseline" / "wuji_manus_demo" / "config" / "retarget_manus_left.yaml"
 HAND_SIDE = "left"
