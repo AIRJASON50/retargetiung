@@ -201,6 +201,10 @@ class MuJoCoFloatingHandModel:
         self._site_ids = {}
         self._rebuild_caches()
 
+        # Preallocated buffer reused by get_body_jacp; MuJoCo writes into jacp in-place,
+        # so we return a copy to preserve caller semantics (old code returned a fresh array).
+        self._jacp_buf = np.zeros((3, self.nv))
+
     # ==========================================================================
     # Public Methods
     # ==========================================================================
@@ -246,14 +250,14 @@ class MuJoCoFloatingHandModel:
         import mujoco as mj
 
         bid = self.get_body_id(body_name)
-        jacp = np.zeros((3, self.nv))
+        jacp = self._jacp_buf
         if bid < 0:
             # Site-backed: use mj_jacSite
             sid = -(bid + 1)
             mj.mj_jacSite(self.model, self.data, jacp, None, sid)
         else:
             mj.mj_jacBody(self.model, self.data, jacp, None, bid)
-        return jacp
+        return jacp.copy()  # copy to avoid mutation from next call
 
     def get_body_jacobians(self, body_names: list[str]) -> np.ndarray:
         """Get stacked translational Jacobians for multiple bodies.
