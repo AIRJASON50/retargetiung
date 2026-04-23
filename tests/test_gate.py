@@ -19,13 +19,11 @@ Run: PYTHONPATH=src pytest tests/test_gate.py -v
 from __future__ import annotations
 
 import os
-import sys
 
 import numpy as np
 import pytest
 
 _WUJI_SDK = os.environ.get("WUJI_SDK_PATH", "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public")
-sys.path.insert(0, _WUJI_SDK)
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 URDF = os.path.join(_WUJI_SDK, "wuji_retargeting/wuji_hand_description/urdf/left.urdf")
