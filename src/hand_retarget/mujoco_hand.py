@@ -527,10 +527,7 @@ class MuJoCoFloatingHandModel:
         ]
         wrist_bid = -1
         for name in candidates:
-            try:
-                bid = mj.mj_name2id(m, mj.mjtObj.mjOBJ_BODY, name)
-            except Exception:
-                bid = -1
+            bid = mj.mj_name2id(m, mj.mjtObj.mjOBJ_BODY, name)
             if bid >= 0:
                 wrist_bid = bid
                 break
