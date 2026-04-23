@@ -16,6 +16,7 @@ import qpsolvers
 from scipy import sparse as sp
 from scipy.spatial.transform import Rotation as RotLib
 from tqdm import tqdm
+from wuji_retargeting.mediapipe import estimate_frame_from_hand_points
 
 from .config import (
     JOINTS_MAPPING_LEFT,
@@ -1065,9 +1066,6 @@ class InteractionMeshHandRetargeter:
                 if self.config.floating_base and self.nq > 20:
                     self.q_lb[:6] = 0.0
                     self.q_ub[:6] = 0.0
-
-        if np_any and getattr(self.hand, "_has_object", False):
-            from wuji_retargeting.mediapipe import estimate_frame_from_hand_points  # noqa: PLC0415
 
         try:
             for t in tqdm(range(T), desc="Retargeting (obj mode)"):
