@@ -64,7 +64,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-PROJECT_DIR = Path(__file__).resolve().parents[2]
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 sys.path.insert(0, str(PROJECT_DIR))
 
