@@ -21,8 +21,8 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 _WUJI_SDK = os.environ.get("WUJI_SDK_PATH", "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public")
 
-from hand_retarget import HandRetargetConfig, InteractionMeshHandRetargeter
-from hand_retarget.mediapipe_io import load_pkl_sequence, preprocess_sequence
+from hand_retarget import HandRetargetConfig, InteractionMeshHandRetargeter  # noqa: E402
+from hand_retarget.mediapipe_io import load_pkl_sequence, preprocess_sequence  # noqa: E402
 
 URDF = Path(_WUJI_SDK) / "wuji_retargeting/wuji_hand_description/urdf/left.urdf"
 PKL = PROJECT_DIR / "data" / "manus_for_pinch" / "manus1_5k.pkl"
@@ -84,7 +84,7 @@ def verify():
 
     max_diff = np.abs(current - baseline).max()
     mean_diff = np.abs(current - baseline).mean()
-    print(f"\nComparison vs baseline:")
+    print("\nComparison vs baseline:")
     print(f"  max  abs diff: {max_diff:.2e}")
     print(f"  mean abs diff: {mean_diff:.2e}")
 
