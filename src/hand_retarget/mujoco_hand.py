@@ -36,7 +36,7 @@ WRIST_DOF: int = 6
 class HandModelProtocol(Protocol):
     """Structural interface for hand FK/Jacobian models.
 
-    Both ``MuJoCoHandModel`` (Pinocchio, fixed base) and
+    Both ``PinocchioHandModel`` (fixed base) and
     ``MuJoCoFloatingHandModel`` (MuJoCo, floating base) satisfy this protocol.
     New hand models (e.g. Allegro, Shadow) should implement these members.
     """
@@ -65,10 +65,7 @@ class HandModelProtocol(Protocol):
 
 
 class PinocchioHandModel:
-    """Pinocchio-based model wrapper for a fixed-base dexterous hand.
-
-    Name kept as MuJoCoHandModel for backward compatibility with retargeter.py imports.
-    """
+    """Pinocchio-based model wrapper for a fixed-base dexterous hand."""
 
     # ==========================================================================
     # Dunder Methods
@@ -586,7 +583,3 @@ class MuJoCoFloatingHandModel:
             if site_name in self._site_ids:
                 # Register tip_link as a "virtual body" backed by a site
                 self._body_ids[tip_link_name] = -(self._site_ids[site_name] + 1)  # negative = site
-
-
-# Backward compatibility alias
-MuJoCoHandModel = PinocchioHandModel
