@@ -185,6 +185,15 @@ class InteractionMeshHandRetargeter:
                         if mp_idx in self.mp_indices:
                             self._excluded_finger_kp_indices.append(self.mp_indices.index(mp_idx))
 
+        # Pre-resolve mp_idx -> body-id spec once at init, honoring surrogate
+        # flags. The hot-path ``_mp_body_pos_jacp`` bypasses JOINTS_MAPPING
+        # lookup + string slicing + ``hand._body_ids`` dict lookup by dispatching
+        # on these int ids. Spec forms: ``("single", bid)`` or
+        # ``("midpoint", bid1, bid2)``. Surrogate config is assumed fixed after
+        # ``__init__``; changing flags at runtime requires rebuilding the
+        # retargeter (or clearing ``self._mp_resolver``).
+        self._mp_resolver = self._build_mp_resolver()
+
     # ==========================================================================
     # Public Methods
     # ==========================================================================
@@ -545,6 +554,46 @@ class InteractionMeshHandRetargeter:
         """
         return [self._mp_body_name(i) for i in self.mp_indices]
 
+    def _build_mp_resolver(self) -> dict[int, tuple]:
+        """Pre-resolve every mp_idx to a body-id spec tuple honoring surrogate
+        flags. Called once at ``__init__`` time.
+
+        Returns:
+            dict keyed by mp_idx (0..20). Each value is one of:
+              - ``("single", bid)``:             single body lookup (pos/jacp)
+              - ``("midpoint", bid1, bid2)``:    0.5·(body1 + body2) (MCP midpoint mode)
+
+        Keeping this pre-computed eliminates per-call ``JOINTS_MAPPING[mp_idx]``
+        dict lookup, conditional string slicing, and ``hand._body_ids[name]``
+        dict lookup inside the QP hot loop.
+        """
+        _jm = JOINTS_MAPPING_LEFT if self.config.hand_side == "left" else JOINTS_MAPPING_RIGHT
+        resolver: dict[int, tuple] = {}
+        for mp_idx, body in _jm.items():
+            # Thumb CMC override: link1 -> link2
+            if mp_idx == 1 and self.config.thumb_cmc_surrogate == "link2":
+                body_l2 = body[: -len("link1")] + "link2"
+                resolver[mp_idx] = ("single", self.hand.get_body_id(body_l2))
+                continue
+            # Non-thumb MCP surrogate
+            if mp_idx in _NON_THUMB_MCP_MP:
+                mode = self.config.mcp_surrogate
+                body_l2 = body[: -len("link1")] + "link2"
+                if mode == "link1":
+                    resolver[mp_idx] = ("single", self.hand.get_body_id(body))
+                elif mode == "link2":
+                    resolver[mp_idx] = ("single", self.hand.get_body_id(body_l2))
+                else:  # midpoint
+                    resolver[mp_idx] = (
+                        "midpoint",
+                        self.hand.get_body_id(body),
+                        self.hand.get_body_id(body_l2),
+                    )
+                continue
+            # Default: direct mapping
+            resolver[mp_idx] = ("single", self.hand.get_body_id(body))
+        return resolver
+
     def _mp_body_pos_jacp(self, mp_idx: int) -> tuple[np.ndarray, np.ndarray]:
         """Return (world position, positional Jacobian 3×nq) for the robot body
         corresponding to a MediaPipe landmark, honoring surrogate flags.
@@ -569,37 +618,31 @@ class InteractionMeshHandRetargeter:
         always use ``joints_mapping`` directly. Callers must have already called
         ``self.hand.forward(q)``. This is the single entry point for landmark →
         body mapping across cos-IK bones, warmup tip anchor, and IM keypoints.
+
+        Implementation dispatches on a pre-resolved ``self._mp_resolver`` that
+        maps each mp_idx to an int body-id spec, bypassing per-call name
+        lookups and string slicing.
         """
-        _jm = JOINTS_MAPPING_LEFT if self.config.hand_side == "left" else JOINTS_MAPPING_RIGHT
-        body = _jm[mp_idx]
+        spec = self._mp_resolver[mp_idx]
+        if spec[0] == "single":
+            bid = spec[1]
+            p = self.hand.get_body_pos_by_id(bid)
+            J = self.hand.get_body_jacp_by_id(bid)
+        else:  # "midpoint" — non-thumb MCP with mcp_surrogate="midpoint"
+            bid1, bid2 = spec[1], spec[2]
+            p = 0.5 * (self.hand.get_body_pos_by_id(bid1) + self.hand.get_body_pos_by_id(bid2))
+            J = 0.5 * (self.hand.get_body_jacp_by_id(bid1) + self.hand.get_body_jacp_by_id(bid2))
 
-        # Thumb CMC override
-        if mp_idx == 1 and self.config.thumb_cmc_surrogate == "link2":
-            body_l2 = body[: -len("link1")] + "link2"
-            return self.hand.get_body_pos(body_l2), self.hand.get_body_jacp(body_l2)
-
-        # Non-thumb MCP surrogate
-        if mp_idx in _NON_THUMB_MCP_MP:
-            mode = self.config.mcp_surrogate
-            body_l2 = body[: -len("link1")] + "link2"
-            if mode == "link1":
-                p, J = self.hand.get_body_pos(body), self.hand.get_body_jacp(body)
-            elif mode == "link2":
-                p, J = self.hand.get_body_pos(body_l2), self.hand.get_body_jacp(body_l2)
-            else:  # midpoint
-                p = 0.5 * (self.hand.get_body_pos(body) + self.hand.get_body_pos(body_l2))
-                J = 0.5 * (self.hand.get_body_jacp(body) + self.hand.get_body_jacp(body_l2))
-            # Back-of-hand surface offset
-            if self.config.mcp_surface_offset_m != 0.0:
-                n = self._palm_back_normal()
-                p = p + self.config.mcp_surface_offset_m * n
-                # Jacobian unchanged: when wrist is locked, n is constant in world;
-                # when wrist floats, this is a first-order approximation that
-                # ignores the Jacobian of n w.r.t. wrist DOFs (small, tolerable).
-            return p, J
-
-        # Default: direct mapping
-        return self.hand.get_body_pos(body), self.hand.get_body_jacp(body)
+        # Back-of-hand surface offset (non-thumb MCP only). Rare path (default
+        # 0.0); kept outside the resolver because the offset normal depends on
+        # current FK state, not on pre-resolved ids.
+        if mp_idx in _NON_THUMB_MCP_MP and self.config.mcp_surface_offset_m != 0.0:
+            n = self._palm_back_normal()
+            p = p + self.config.mcp_surface_offset_m * n
+            # Jacobian unchanged: when wrist is locked, n is constant in world;
+            # when wrist floats, this is a first-order approximation that
+            # ignores the Jacobian of n w.r.t. wrist DOFs (small, tolerable).
+        return p, J
 
     def _palm_back_normal(self) -> np.ndarray:
         """Unit vector normal to the palm plane, pointing toward the back of the hand.

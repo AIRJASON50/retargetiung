@@ -56,6 +56,10 @@ class HandModelProtocol(Protocol):
 
     def get_body_jacobians(self, body_names: list[str]) -> np.ndarray: ...
 
+    def get_body_pos_by_id(self, bid: int) -> np.ndarray: ...
+
+    def get_body_jacp_by_id(self, bid: int) -> np.ndarray: ...
+
     def get_default_qpos(self) -> np.ndarray: ...
 
 
@@ -151,6 +155,21 @@ class PinocchioHandModel:
         for i, name in enumerate(body_names):
             J[3 * i : 3 * (i + 1), :] = self.get_body_jacp(name)
         return J
+
+    def get_body_pos_by_id(self, bid: int) -> np.ndarray:
+        """Get world position of a body by its pre-resolved frame id.
+
+        Equivalent to ``get_body_pos(name)`` but skips the name->id dict lookup.
+        Used on the hot retargeting path via the ``InteractionMeshHandRetargeter``
+        mp_idx->body_id resolver.
+        """
+        return self.data.oMf[bid].translation.copy()
+
+    def get_body_jacp_by_id(self, bid: int) -> np.ndarray:
+        """Get translational Jacobian (world frame) of a body by pre-resolved
+        frame id. Equivalent to ``get_body_jacp(name)`` minus the name lookup.
+        """
+        return pin.getFrameJacobian(self.model, self.data, bid, pin.LOCAL_WORLD_ALIGNED)[:3, :]
 
     def get_default_qpos(self) -> np.ndarray:
         """Get default (mid-range) joint positions for fixed-base hand."""
@@ -276,6 +295,34 @@ class MuJoCoFloatingHandModel:
         for i, name in enumerate(body_names):
             J[3 * i : 3 * (i + 1), :] = self.get_body_jacp(name)
         return J
+
+    def get_body_pos_by_id(self, bid: int) -> np.ndarray:
+        """Get world position by pre-resolved body id.
+
+        Mirrors ``get_body_pos`` semantics: a negative id encodes a site-backed
+        virtual body (tip_link), resolved via ``site_xpos[-(bid+1)]``.
+        """
+        if bid < 0:
+            sid = -(bid + 1)
+            return self.data.site_xpos[sid].copy()
+        return self.data.xpos[bid].copy()
+
+    def get_body_jacp_by_id(self, bid: int) -> np.ndarray:
+        """Get translational Jacobian (world frame) by pre-resolved body id.
+
+        Mirrors ``get_body_jacp`` semantics: negative ids route to
+        ``mj_jacSite``. Uses the preallocated ``_jacp_buf`` and returns a copy
+        so callers retain the same "owned ndarray" contract as the named API.
+        """
+        import mujoco as mj
+
+        jacp = self._jacp_buf
+        if bid < 0:
+            sid = -(bid + 1)
+            mj.mj_jacSite(self.model, self.data, jacp, None, sid)
+        else:
+            mj.mj_jacBody(self.model, self.data, jacp, None, bid)
+        return jacp.copy()
 
     def get_default_qpos(self) -> np.ndarray:
         """Get default joint positions (wrist at zero, fingers at mid-range)."""
