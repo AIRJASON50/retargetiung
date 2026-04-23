@@ -7,4 +7,4 @@ ignore = ["E501"]  # line length handled by formatter
 
 [lint.isort]
 combine-as-imports = true
-known-first-party = ["hand_retarget", "scene_builder"]
+known-first-party = ["hand_retarget", "hand_retarget_viz", "scene_builder"]

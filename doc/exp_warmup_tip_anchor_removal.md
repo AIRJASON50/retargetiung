@@ -26,10 +26,9 @@ J_rows.append(np.sqrt(w_tip) * J_tip)
    shift-invariant),不需要 bias 就能跟硬约束共存。我们的 tip anchor 与非穿透硬
    约束会在"source landmark 穿进 mesh"时形成 7.5mm 量级的持续矛盾,之前代码里
    `CAPSULE_RADIUS=7.5mm` 的 tolerance 就是为了和解这一项。
-3. **分析上的近 no-op**:`retargeter.py` docstring 和
-   `experiments/archive/warmup_diagnosis/probe_gradient_decomp.py` 在 Manus 上
-   测得 tip 项对 q 的影响 ~1°,骨方向项 ~10°。J_dir 的 `1/bone_length ≈ 33×`
-   在 Hessian 里完全主导。HO-Cap 上未验证过。
+3. **分析上的近 no-op**:`retargeter.py` docstring + Manus 上的梯度分解测得 tip 项
+   对 q 的影响 ~1°,骨方向项 ~10°。J_dir 的 `1/bone_length ≈ 33×` 在 Hessian 里
+   完全主导。HO-Cap 上未验证过。
 
 本次实验:**在 Manus 和 HO-Cap 两端验证 tip anchor 是否真的是 no-op,再决定是否删除**。
 
@@ -114,7 +113,6 @@ Worktree `.worktrees/exp-tip-anchor-removal` 加 config flag `use_warmup_tip_anc
 - `.worktrees/exp-tip-anchor-removal/experiments/exp_tip_anchor_removal.py` — A/B 驱动
 - `.worktrees/exp-tip-anchor-removal/experiments/tip_anchor_removal_exp/REPORT.md` — 完整报告
 - `.worktrees/exp-tip-anchor-removal/experiments/tip_anchor_removal_exp/summary.json` — 聚合指标
-- `experiments/archive/warmup_diagnosis/probe_gradient_decomp.py` — 原始分析证据
 
 ## 复现
 

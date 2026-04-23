@@ -37,15 +37,13 @@ retargeting/
 │   ├── mediapipe_io.py          # SVD+MANO 预处理、HO-Cap clip 加载
 │   └── config.py                # HandRetargetConfig + 关键点映射
 ├── src/scene_builder/           # MuJoCo 场景构建（指尖 site 注入、腕部 6DOF）
+├── src/hand_retarget_viz/       # 可视化 helpers（overlay/playback/cache/world_frame）
 ├── assets/                      # 机器人手模型（MuJoCo XML、STL 网格）
 ├── config/                      # YAML 配置文件
-├── demos/                       # 可视化脚本
-│   ├── legacy/                  #   Manus 数据回放
-│   ├── hocap/                   #   HO-Cap 手物交互回放
-│   └── shared/                  #   回放工具库
-├── scripts/                     # 批量重定向脚本
+├── demos/                       # 端到端演示（manus.py、hocap.py、omniretarget.py）
+├── scripts/                     # 批量 + 对比工具（retarget_hocap、compare_hocap）
 ├── tests/                       # pytest 门控测试
-├── experiments/archive/         # 已完成实验归档
+├── experiments/                 # 当前活跃实验
 └── doc/                         # 算法笔记、改进计划
 ```
 
@@ -63,10 +61,10 @@ export WUJI_SDK_PATH="/path/to/wuji_retargeting_private/public"
 
 ```bash
 # Manus 手套数据可视化
-PYTHONPATH=src python demos/legacy/play_interaction_mesh.py --semantic-weight
+PYTHONPATH=src python demos/manus.py --semantic-weight
 
 # HO-Cap 手物交互可视化
-PYTHONPATH=src python demos/hocap/play_hocap.py --clip hocap__subject_3__20231024_161306__seg00
+PYTHONPATH=src python demos/hocap.py --clip hocap__subject_3__20231024_161306__seg00
 
 # 运行测试
 PYTHONPATH=src pytest tests/test_gate.py -v

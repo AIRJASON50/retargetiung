@@ -33,9 +33,8 @@ a single ball joint. Options:
 
 - ``"link1"`` — flex-pivot body (pre-abd); was the historical default but biased
   the "wrist→MCP" bone by ~5-10° because link1 sits before the abd pivot.
-- ``"link2"`` — abd-pivot body; default since ablation
-  (experiments/archive/warmup_diagnosis/probe_mcp_full_ablation.py) showed it
-  strictly improves wrist→MCP, tip_err, tip_obj, and fps.
+- ``"link2"`` — abd-pivot body; default since ablation showed it strictly
+  improves wrist→MCP, tip_err, tip_obj, and fps.
 - ``"midpoint"`` — 0.5·(link1 + link2), approximates virtual ball-joint center.
 
 Applied uniformly via ``_mp_body_pos_jacp`` across cos-IK bone endpoints, warmup
@@ -282,7 +281,6 @@ class HandRetargetConfig:
     #   "l2"          (legacy) — w_a   * ||q - q_S1||²              bilevel approximation,
     #                                                                isotropic q-space pin;
     #                                                                kept for A/B comparison
-    # See experiments/archive/warmup_diagnosis/probe_ab_cosik.py for ablation data.
     anchor_mode: AnchorMode = "cosik_live"
     # Weight on cos-IK term when anchor_mode="cosik_live". Same scale as angle_warmup_weight;
     # the 1/bone_length factor inside J_dir already amplifies it, so this need not be large.
@@ -290,9 +288,8 @@ class HandRetargetConfig:
     # MCP surrogate body for non-thumb cos-IK bones + IM keypoints. Applied
     # uniformly via ``_mp_body_pos_jacp`` so bone endpoints and Delaunay vertices
     # share the same physical point. Default ``link2`` (abd-pivot) — ablation
-    # (``probe_mcp_full_ablation.py``) showed link2 is universally better than
-    # link1 on wrist→MCP residual (-14%), tip_err (-2.6%), tip_obj (-4.4%), fps
-    # (+3%), with no metric regression.
+    # showed link2 is universally better than link1 on wrist→MCP residual (-14%),
+    # tip_err (-2.6%), tip_obj (-4.4%), fps (+3%), with no metric regression.
     mcp_surrogate: McpSurrogate = "link2"
     # Back-of-hand offset applied to non-thumb MCP surrogate position (meters).
     # Kept as a knob for future experiments but disabled by default: C5 ablation

@@ -28,18 +28,16 @@
 - 本实现手写 Gauss-Newton QP: 每条骨匹配 **单位向量差** `||d_rob - d_src||²`(尺度不变)。
 - **历史**: 原实现还附带指尖位置项 `||p_rob - p_src||²`(w_tip=100),
   模仿 GMR 的 ankle 接地锚定。但 HO-Cap 验证为 near-no-op(Manus max 1.89°,
-  HO-Cap RMS 0.24°),已于 **EXP-12 移除**。详见
-  `doc/exp_warmup_tip_anchor_removal.md` 和
-  `experiments/archive/warmup_diagnosis/probe_weight_vs_units.py`(移除前的证据)。
+  HO-Cap RMS 0.24°),已于 **EXP-12 移除**。详见 `doc/exp_warmup_tip_anchor_removal.md`。
 - 收敛检测: `||q_new - q_old|| < warmup_convergence_delta` (默认 1e-3)
 - 外循环上限: 首帧 `angle_warmup_iters_first=20`(远离默认姿态,需要更大预算),
   非首帧 `angle_warmup_iters=5`(warm-start,2-3 iter 就收敛)
 - 91fps, PIP/DIP 0% 反弓 (Manus 上天然; HO-Cap 上因骨长比差 0.44-0.69× 仍会反弓)
 
 **历史重构**: 原实现在 warmup 外循环后又调用 `_extract_cosik_targets` 多跑 3 iter cosine IK
-产出 S2 anchor 的 `q_target`。probe `warmup_diagnosis/probe_extract_targets.py` 显示
-99.4% 帧里这 3 iter 第 1 次就 break 且 drift < 1e-4 rad(数值噪声),纯冗余。已删除,
-`q_target` 直接使用 warmup 收敛结果;唯一真正需要多迭代的首帧通过 `iters_first=20` 覆盖。
+产出 S2 anchor 的 `q_target`。实测 99.4% 帧里这 3 iter 第 1 次就 break 且 drift <
+1e-4 rad(数值噪声),纯冗余。已删除,`q_target` 直接使用 warmup 收敛结果;唯一真正需要
+多迭代的首帧通过 `iters_first=20` 覆盖。
 
 ### 联合 cost (非两阶段)
 
@@ -98,11 +96,11 @@ config.exclude_fingers_from_laplacian = [4]  # 小拇指排除
 
 ```bash
 # Manus 可视化
-PYTHONPATH=src python demos/legacy/play_interaction_mesh.py \
+PYTHONPATH=src python demos/manus.py \
     --link-midpoint --angle-warmup --semantic-weight
 
 # HO-Cap 可视化
-PYTHONPATH=src python demos/hocap/play_hocap.py \
+PYTHONPATH=src python demos/hocap.py \
     --link-midpoint --angle-warmup --semantic-weight \
     --clip hocap__subject_3__20231024_162409__seg00
 ```
@@ -136,9 +134,8 @@ cost = λ_IM · IM(q) + w_rot · Σ_bones ‖d_rob(q) − d_src‖² + smooth
 cos-IK cost 在每次 S2 iter 基于 current q 重算,Jacobian `J^T J` 的各向
 异性让骨方向约束**自适应** —— 敏感方向墙壁陡峭、不敏感方向墙壁平缓。
 
-### 数据(`experiments/archive/warmup_diagnosis/probe_ab_cosik.py`)
+### 数据(HO-Cap `subject_1_165502_seg00`, 166 帧, 扫 `w_rot ∈ {5, 1, 0.5}`)
 
-HO-Cap `subject_1_165502_seg00`, 166 帧, 扫 `w_rot ∈ {5, 1, 0.5}`:
 
 | 指标 | A (l2, w=5) | B (cosik_live, w=5) | B (w=1) | B (w=0.5) |
 |------|------------|---------------------|---------|-----------|

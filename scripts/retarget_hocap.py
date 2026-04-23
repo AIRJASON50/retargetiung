@@ -44,7 +44,6 @@ from scipy.spatial.transform import Rotation as RotLib
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
-sys.path.insert(0, str(PROJECT_DIR))
 import os; _WUJI_SDK = os.environ.get("WUJI_SDK_PATH", "/home/l/ws/doc/WujiRepo/wuji_retargeting_private/public"); sys.path.insert(0, _WUJI_SDK)
 
 from hand_retarget import InteractionMeshHandRetargeter, HandRetargetConfig  # noqa: E402
