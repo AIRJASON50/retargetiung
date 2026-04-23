@@ -105,6 +105,22 @@ def verify():
         sys.exit(1)
 
 
+# ==========================================================================
+# pytest entry point
+# ==========================================================================
+
+
+def test_refactor_baseline():
+    """Gate: retarget output must match frozen baseline (same as --verify)."""
+    import pytest
+    if not BASELINE_NPZ.exists():
+        pytest.skip(f"baseline not captured: {BASELINE_NPZ} (run with --capture)")
+    baseline = np.load(str(BASELINE_NPZ))["qpos"]
+    current = run_retarget()
+    max_diff = float(np.abs(current - baseline).max())
+    assert max_diff < 1e-6, f"regression: max diff {max_diff:.2e} (tol 1e-6)"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
