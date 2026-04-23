@@ -245,7 +245,7 @@ MuJoCo `mj_name2id` 正常路径是**返回 -1 不抛异常**,这里 `except Exc
 ---
 
 ### BUG-19 · 测试覆盖缺口
-**状态**: partially merged — test_config.py (5e7d210, 7 tests), test_mesh_utils.py (3d1df17, 8 tests);test_hocap_smoke/pytest-ify test_refactor_baseline 待后续
+**状态**: partially merged — test_config.py (5e7d210, 7 tests), test_mesh_utils.py (3d1df17, 8 tests), pytest-ify test_refactor_baseline (8aa2d8e, 1 test);test_hocap_smoke.py 基本冗余(strengthened gate 7a75c1b 已覆盖 HO-Cap),可关闭
 **文件**: `tests/`
 
 仅 `test_gate.py`(5 个 assert)+ 脚本式 `test_refactor_baseline.py`(非 pytest)。
