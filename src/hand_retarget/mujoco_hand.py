@@ -204,6 +204,9 @@ class MuJoCoFloatingHandModel:
         # Preallocated buffer reused by get_body_jacp; MuJoCo writes into jacp in-place,
         # so we return a copy to preserve caller semantics (old code returned a fresh array).
         self._jacp_buf = np.zeros((3, self.nv))
+        # Preallocated fromto buffer reused by query_hand_penetration; mj_geomDistance
+        # overwrites all 6 entries each call, so no defensive reset is needed.
+        self._pen_fromto_buf = np.zeros(6)
 
     # ==========================================================================
     # Public Methods
@@ -459,8 +462,13 @@ class MuJoCoFloatingHandModel:
             return []
 
         results = []
-        fromto = np.zeros(6)
-        jacp = np.zeros((3, self.nv))
+        # Reuse preallocated buffers; both mj_geomDistance and mj_jac overwrite
+        # their out-params each call, so no per-iter reset is needed. J_contact
+        # from ``nhat @ jacp`` is a fresh ndarray (numpy matmul is not in-place),
+        # but we still .copy() defensively since the next mj_jac call will
+        # overwrite jacp and the caller retains the reference.
+        fromto = self._pen_fromto_buf
+        jacp = self._jacp_buf
         obj_gid = self._obj_geom_id
 
         for gid in self._hand_col_geom_ids:
