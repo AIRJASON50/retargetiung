@@ -300,7 +300,7 @@ class HandRetargetConfig:
     # default ``link2`` drops wrist→CMC residual by ~26% vs ``link1``.
     thumb_cmc_surrogate: Literal["link1", "link2"] = "link2"
     smooth_weight: float = 1.0  # Temporal smoothness (5:5:1 ratio with anchor and laplacian)
-    exclude_fingers_from_laplacian: list = None  # Finger indices (0-4) excluded from Laplacian gradient
+    exclude_fingers_from_laplacian: list[int] | None = None  # Finger indices (0-4) excluded from Laplacian gradient
 
     # Object-frame Laplacian: compute Laplacian in object local coordinates
     use_object_frame: bool = False
@@ -308,7 +308,7 @@ class HandRetargetConfig:
     # MediaPipe preprocessing
     global_scale: float = 1.0
     use_mano_rotation: bool = True  # True: SVD+OPERATOR2MANO (manus data), False: wrist-center only (HO-Cap)
-    mediapipe_rotation: dict = field(
+    mediapipe_rotation: dict[str, float] = field(
         default_factory=lambda: {
             "x": 0.0,
             "y": 0.0,
