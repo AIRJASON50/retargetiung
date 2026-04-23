@@ -2,7 +2,53 @@
 
 5 位 expert(CS 架构 / Python / 数据结构 / 机器人学 / 优化理论)并行审查结果,2026-04-23。
 
-| Legend | |
+## 进度总表(2026-04-23 更新)
+
+**20 个 bug 中 7 fully merged / 3 partial / 10 open**:
+
+| 状态 | 数量 | Bugs |
+|---|---|---|
+| ✅ 完全 merged | 7 | BUG-01 · 11 · 12 · 17 · 18 · 19(3/4 subset)· 20 |
+| 🟡 Partial(仅 safe subset) | 3 | BUG-09(alias 已清;**拆文件待做**)· BUG-14(`_jacp_buf` 已加;**预解析 body_id + FK-pass 合并待做**)· BUG-15(buffer 已加;**active-set cache + broadphase 待做**) |
+| ❌ Open | 10 | BUG-02 · 03 · 04 · 05 · 06 · 07 · 08 · 10 · 13 · 16 |
+
+## 剩余 13 项(10 open + 3 partial 的剩余)分类
+
+### 🔵 可以继续当"小活"做(byte-identical 或近 byte-identical)
+
+| Bug | 内容 | 规模 | 风险 |
+|---|---|---|---|
+| BUG-09 剩余 | 拆 `mujoco_hand.py` → `pinocchio_hand.py` + `mujoco_hand.py` | 跨 2-3 文件,机械 | 低(但和 background task 冲突,需先等 background commit)|
+| BUG-14 第 2 条 | 预解析 `mp_idx → body_id`,消除 dict 查表 | 跨 `mujoco_hand.py` + `retargeter.py`,小 | 低(byte-identical 可行)|
+| BUG-16 | Delaunay adj_list cache(hash(simplices) 对比,帧间复用)| `retargeter.py` + `mesh_utils.py`,中 | 低(careful hash-based invalidation 保持 byte-identical)|
+
+### 🟠 真正的"大活",做之前需要讨论策略
+
+| Bug | 内容 | 前置决策 |
+|---|---|---|
+| BUG-13 | `calculate_laplacian_matrix` 返回 CSR,预建 COO 索引模板 | 返回类型变 → 改所有 caller;可能非 byte-identical |
+| BUG-14 第 3 条 | `_get_robot_keypoints` + `_get_robot_jacobians` 合并单 FK-pass | 改调用顺序,可能 ULP 漂移,需 baseline 重建 |
+| BUG-15 剩余 | active-set cache + AABB 粗筛 + `mj_collision` broadphase | 改约束集 membership,需 EXP-13 全量 A/B |
+| BUG-02 ⚠️ | `_align_frame` lstsq 不一致 → 旋转**正确性 bug**,改了 qpos 会变 | **baseline 必须重建**;涉及旋转严格校对 |
+| BUG-03 | DIP 反弓 clamp `q_lb[DIP] = max(0, lb)` | 加硬约束,改 qpos,需重建 baseline |
+| BUG-04 | IM 量纲归一 `L_char=0.03` 默认 | 改权重平衡,改 qpos,需 EXP-13 全 compare |
+| BUG-05 | Gauss-Newton + Levenberg-Marquardt damping | 改 SQP 数值行为,改 qpos,需 A/B |
+| BUG-06 | 源 landmark 穿透时硬→软约束 fallback | 改约束 handling,改 qpos |
+| BUG-07 | `InteractionMeshHandRetargeter` God Class 拆分 | 大重构,1000+ 行 → 4 策略类 |
+| BUG-08 | `HandRetargetConfig` 30 字段拆 nested config | 破坏 API,需迁移 YAML |
+| BUG-10 | `scene_builder` public API 改造 | 设计决策,同时影响 `retargeter.py` + `mujoco_hand.py` |
+
+---
+
+## 建议执行顺序
+
+1. **本轮收尾**:BUG-09 剩余(等 background commit)· BUG-14 第 2 条 · BUG-16 — 都可当"小活"并入 main(byte-identical)
+2. **集中讨论点**:上面 🟠 11 条里挑 1-2 条定策略(哪个优先?基线重建方案?API 迁移方案?)
+3. **非算法性架构**:BUG-07、BUG-08、BUG-10 — 大 PR,独立分支做
+
+## Legend
+
+| Mark | 含义 |
 |---|---|
 | ⚠️  | 涉及旋转/坐标系约定,改动必须谨慎校对 |
 | 🔴 P0 | 正确性 bug,必修 |
