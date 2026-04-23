@@ -135,9 +135,7 @@ class PinocchioHandModel:
             (3, nq) matrix: dp/dq in world frame.
         """
         fid = self.get_body_id(body_name)
-        J_local = pin.getFrameJacobian(self.model, self.data, fid, pin.LOCAL)
-        R = self.data.oMf[fid].rotation
-        return R @ J_local[:3, :]  # (3, nq) in world frame
+        return pin.getFrameJacobian(self.model, self.data, fid, pin.LOCAL_WORLD_ALIGNED)[:3, :]
 
     def get_body_jacobians(self, body_names: list[str]) -> np.ndarray:
         """Get stacked translational Jacobians for multiple bodies.
