@@ -297,7 +297,11 @@ class InteractionMeshHandRetargeter:
         # lap_var = J_L @ dq + lap0_vec
         # Cost becomes: ||sqrt_w * (J_L @ dq + lap0 - target_lap)||^2
         lap_residual = lap0_vec - target_lap_vec  # (3V,)
-        J_w = np.diag(sqrt_w3) @ J_L.toarray() if sp.issparse(J_L) else np.diag(sqrt_w3) @ J_L
+        # Row-scale J_L by sqrt_w3 without materializing the 3V x 3V diag matrix.
+        # Old: np.diag(sqrt_w3) @ dense is an O(V^2 * nq) GEMM with a mostly-zero
+        # operand. New: broadcast scalar-multiply each row, O(V * nq).
+        J_L_dense = J_L.toarray() if sp.issparse(J_L) else J_L
+        J_w = sqrt_w3[:, None] * J_L_dense  # (3V, nq)
         r_w = sqrt_w3 * lap_residual
 
         # Build QP: min (1/2) dq^T H dq + c^T dq
